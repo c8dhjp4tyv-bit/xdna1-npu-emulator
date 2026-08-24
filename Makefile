@@ -9,7 +9,7 @@ CORE_SRC := $(wildcard src/*.c)
 CORE_OBJ := $(CORE_SRC:.c=.o)
 
 BUILD    := build
-TESTS    := $(BUILD)/test_boot
+TESTS    := $(BUILD)/test_boot $(BUILD)/test_exec
 
 .PHONY: all test clean
 
@@ -24,11 +24,13 @@ $(BUILD)/libxdna.a: $(CORE_OBJ) | $(BUILD)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILD)/test_boot: tests/test_boot.c $(BUILD)/libxdna.a | $(BUILD)
-	$(CC) $(CFLAGS) $< $(BUILD)/libxdna.a -o $@ $(LDFLAGS)
+$(BUILD)/test_%: tests/test_%.c tests/drv_model.c $(BUILD)/libxdna.a | $(BUILD)
+	$(CC) $(CFLAGS) -Itests $< tests/drv_model.c $(BUILD)/libxdna.a -o $@ $(LDFLAGS)
 
 test: $(TESTS)
 	@$(BUILD)/test_boot
+	@echo
+	@$(BUILD)/test_exec
 
 clean:
 	rm -rf $(BUILD) $(CORE_OBJ)

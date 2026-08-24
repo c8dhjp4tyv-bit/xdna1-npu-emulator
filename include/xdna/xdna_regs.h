@@ -262,11 +262,13 @@ enum xdna_msg_status {
 /* XDNA1 array topolojisi                                               */
 /* ------------------------------------------------------------------ */
 /*
- * TODO(dogrula): Bu degerler AMD'nin acik XDNA dokumantasyonundan ve
- * Phoenix/Hawk Point icin bilinen 5 kolon x 4 compute tile topolojisinden
- * turetildi. QUERY_AIE_TILE_INFO cevabinda kullaniliyorlar ve surucunun
- * metadata.cols alanini besliyorlar. Gercek bir Hawk Point'te
- * `xrt-smi examine` / ioctl ciktisiyla birebir karsilastirilmalidir.
+ * Topoloji artik aie-rt kaynagindan DOGRULANDI:
+ *   driver/tests/stest/hw_config.h -- AIE_GEN 2, DEVICE 0 blogu
+ *   (6 satir, 5 kolon, shim satir 0, mem tile satir 1, compute satir 2..5)
+ * Ayrintili sabitler include/xdna/xdna_aie.h icinde.
+ *
+ * Geriye kalan dogrulanmamis alan yalnizca QUERY_AIE_TILE_INFO cevabindaki
+ * `size` (kolon durumu dump boyutu) -- bkz. src/xdna_mert.c.
  */
 #define XDNA_AIE_COLS            5u
 #define XDNA_AIE_CORE_ROWS       4u

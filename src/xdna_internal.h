@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "xdna/xdna_aie.h"
 #include "xdna/xdna_emu.h"
 #include "xdna/xdna_regs.h"
 
@@ -73,7 +74,97 @@ typedef struct XdnaContext {
     unsigned chan;        /* kanal / MSI-X indeksi */
     uint64_t heap_addr;   /* MAP_HOST_BUFFER ile bildirilen instruction heap */
     uint64_t heap_size;
+
+    /* CONFIG_CU ile bildirilen CU -> PDI eslemesi */
+    uint32_t num_cus;
+    uint32_t cu_cfg[32];  /* aie2_msg_priv.h: MAX_NUM_CUS */
 } XdnaContext;
+
+/* ---------------------------------------------------------------- */
+/* XDNA array modeli (src/xdna_array.c)                              */
+/* ---------------------------------------------------------------- */
+
+typedef enum {
+    AIE_TILE_SHIM = 0,
+    AIE_TILE_MEM,
+    AIE_TILE_CORE,
+} AieTileKind;
+
+enum {
+    AIE_DMA_S2MM = 0,   /* stream -> bellek */
+    AIE_DMA_MM2S = 1,   /* bellek -> stream */
+    AIE_DMA_NUM_DIR
+};
+
+typedef struct {
+    uint32_t off;
+    uint32_t val;
+} AieRegEntry;
+
+/* Modellenmeyen registerlar icin seyrek saklama. */
+typedef struct {
+    AieRegEntry *tab;
+    uint32_t cap;
+    uint32_t used;
+} AieRegMap;
+
+typedef struct {
+    AieTileKind kind;
+    uint8_t col, row;
+
+    uint8_t *data;          /* mem tile / compute tile veri bellegi */
+    uint32_t data_size;
+    uint8_t *prog;          /* compute tile program bellegi */
+    uint32_t prog_size;
+
+    int32_t lock[AIE_MAX_LOCKS];
+    uint32_t bd[AIE_MAX_BDS][AIE_BD_WORDS];
+    uint32_t ch_ctrl[AIE_DMA_NUM_DIR][AIE_MAX_DMA_CH];
+    uint32_t ch_queue[AIE_DMA_NUM_DIR][AIE_MAX_DMA_CH];
+
+    uint32_t core_ctrl;
+    uint32_t core_status;
+
+    AieRegMap regs;
+} AieTile;
+
+/* Kolon basina stream FIFO -- stream switch modeli yerine gecici. */
+typedef struct {
+    uint8_t *buf;
+    size_t cap;
+    size_t len;
+    size_t rd;
+} AieStream;
+
+typedef struct {
+    uint64_t dma_tasks;
+    uint64_t dma_bytes;
+    uint64_t lock_ops;
+    uint64_t core_starts;
+    uint64_t txn_ops;
+} AieStats;
+
+typedef struct XdnaArray {
+    XdnaNpu *npu;
+    AieTile tile[AIE_NUM_COLS][AIE_NUM_ROWS];
+    AieStream stream[AIE_NUM_COLS];
+    AieStats stats;
+} XdnaArray;
+
+XdnaArray *xdna_array_new(XdnaNpu *npu);
+void xdna_array_free(XdnaArray *arr);
+void xdna_array_reset(XdnaArray *arr);
+AieTile *xdna_array_tile(XdnaArray *arr, uint8_t col, uint8_t row);
+uint32_t xdna_array_read32(XdnaArray *arr, uint8_t col, uint8_t row,
+                           uint32_t off);
+void xdna_array_write32(XdnaArray *arr, uint8_t col, uint8_t row, uint32_t off,
+                        uint32_t val);
+void xdna_array_block_write(XdnaArray *arr, uint8_t col, uint8_t row,
+                            uint32_t off, const uint32_t *data, uint32_t words);
+
+/* ctrlcode yurutucu (src/xdna_txn.c) */
+int xdna_txn_execute(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
+                     uint32_t size);
 
 typedef enum {
     XDNA_PSP_COLD = 0,   /* guc yok / firmware yuklenmedi */
@@ -116,6 +207,9 @@ struct XdnaNpu {
     XdnaContext ctx[XDNA_NPU1_HWCTX_LIMIT];
     uint32_t next_ctx_id;
     uint32_t col_used;         /* kolon bitmap'i */
+
+    /* XDNA array */
+    XdnaArray *array;
 
     /* Async event kaydi (MSG_OP_REGISTER_ASYNC_EVENT_MSG) */
     uint64_t async_buf_addr;

@@ -15,6 +15,7 @@
 
 #include <assert.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "xdna_internal.h"
@@ -174,7 +175,62 @@ typedef struct {
     uint32_t status;
 } TelemetryResp;
 
+/* --- Yurutme yolu --- */
+
+#define MAX_NUM_CUS 32
+
+typedef struct {
+    uint32_t num_cus;
+    uint32_t cfgs[MAX_NUM_CUS];
+} ConfigCuReq;
+
+typedef struct {
+    uint64_t inst_buf_addr;
+    uint32_t inst_size;      /* bayt (amdxdna_ctx.h) */
+    uint32_t inst_prop_cnt;
+    uint32_t cu_idx;
+    uint32_t payload[35];
+} ExecDpuReq;
+
+typedef struct {
+    uint64_t buf_addr;
+    uint32_t buf_size;
+    uint32_t count;
+} CmdChainReq;
+
+typedef struct {
+    uint32_t status;
+    uint32_t fail_cmd_idx;
+    uint32_t fail_cmd_status;
+} CmdChainResp;
+
+#define SYNC_BO_DEV_MEM  0u
+#define SYNC_BO_HOST_MEM 2u
+
+typedef struct {
+    uint64_t src_addr;
+    uint64_t dst_addr;
+    uint32_t size;
+    uint32_t type;
+} SyncBoReq;
+
 #pragma pack(pop)
+
+/*
+ * cmd_chain_slot_dpu surucude PACKED DEGIL: u64 hizalamasi geciyor.
+ * args[] slot'un hemen ardindan geliyor.
+ */
+typedef struct {
+    uint64_t inst_buf_addr;
+    uint32_t inst_size;
+    uint32_t inst_prop_cnt;
+    uint32_t cu_idx;
+    uint32_t arg_cnt;
+} CmdChainSlotDpu;
+
+/* Emulator sinirlari: bozuk bir istegin bellegi tuketmesini engeller. */
+#define XDNA_MAX_CTRLCODE_SIZE   (64u * 1024u * 1024u)  /* context heap boyutu */
+#define XDNA_MAX_CMD_CHAIN_SIZE  (1u * 1024u * 1024u)
 
 /* Surucudeki resp struct boyutlariyla birebir eslesme kilidi. */
 static_assert(sizeof(ProtocolVersionResp) == 12, "protocol_version_resp");
@@ -190,6 +246,12 @@ static_assert(sizeof(MapHostBufferReq) == 20, "map_host_buffer_req");
 static_assert(sizeof(AsyncEventResp) == 8, "async_event_msg_resp");
 static_assert(sizeof(ColumnInfoResp) == 8, "aie_column_info_resp");
 static_assert(sizeof(TelemetryResp) == 16, "get_telemetry_resp");
+static_assert(sizeof(ConfigCuReq) == 132, "config_cu_req");
+static_assert(sizeof(ExecDpuReq) == 160, "exec_dpu_req");
+static_assert(sizeof(CmdChainReq) == 16, "cmd_chain_req");
+static_assert(sizeof(CmdChainResp) == 12, "cmd_chain_resp");
+static_assert(sizeof(SyncBoReq) == 24, "sync_bo_req");
+static_assert(sizeof(CmdChainSlotDpu) == 24, "cmd_chain_slot_dpu");
 
 /*
  * TODO(dogrula): QUERY_COL_STATUS icin kolon basina dump boyutu. Surucu bunu
@@ -284,13 +346,13 @@ static void fill_tile_info(AieTileInfo *info)
     info->core_row_start = XDNA_AIE_CORE_ROW_START;
     info->mem_row_start = XDNA_AIE_MEM_ROW_START;
     info->shim_row_start = XDNA_AIE_SHIM_ROW_START;
-    /* TODO(dogrula): asagidaki sayilar AIE2 mimarisinden turetildi. */
-    info->core_dma_channels = 2;
-    info->mem_dma_channels = 6;
-    info->shim_dma_channels = 2;
-    info->core_locks = 16;
-    info->mem_locks = 64;
-    info->shim_locks = 16;
+    /* aie-rt xaie_lite_hwcfg.h (AIE_GEN 2) ile dogrulandi. */
+    info->core_dma_channels = AIE_TILE_DMA_NUM_CH;
+    info->mem_dma_channels = AIE_MEM_TILE_DMA_NUM_CH;
+    info->shim_dma_channels = AIE_SHIM_DMA_NUM_CH;
+    info->core_locks = AIE_TILE_NUM_LOCKS;
+    info->mem_locks = AIE_MEM_TILE_NUM_LOCKS;
+    info->shim_locks = AIE_SHIM_NUM_LOCKS;
     info->core_events = 128;
     info->mem_events = 128;
     info->shim_events = 128;
@@ -423,6 +485,238 @@ static void handle_destroy_context(XdnaNpu *npu, unsigned chan,
         npu->stats.active_contexts--;
     }
     xdna_log(npu, XDNA_LOG_INFO, "MERT: context %u yok edildi", req.context_id);
+    mert_reply_status(npu, chan, hdr, AIE2_STATUS_SUCCESS);
+}
+
+/* ---------------------------------------------------------------- */
+/* Yurutme yolu: CONFIG_CU, EXEC_DPU, CHAIN_EXEC_DPU, SYNC_BO        */
+/* ---------------------------------------------------------------- */
+
+static XdnaContext *ctx_by_chan(XdnaNpu *npu, unsigned chan)
+{
+    unsigned i;
+
+    for (i = 0; i < XDNA_NPU1_HWCTX_LIMIT; i++) {
+        if (npu->ctx[i].valid && npu->ctx[i].chan == chan) {
+            return &npu->ctx[i];
+        }
+    }
+    return NULL;
+}
+
+static void handle_config_cu(XdnaNpu *npu, unsigned chan,
+                             const XdnaMsgHeader *hdr, const uint8_t *payload)
+{
+    ConfigCuReq req;
+    XdnaContext *ctx = ctx_by_chan(npu, chan);
+    uint32_t i;
+
+    if (!ctx) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_MGMT_ERT_INVALID_PARAM);
+        return;
+    }
+    if (hdr->total_size < sizeof(uint32_t)) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+        return;
+    }
+    memset(&req, 0, sizeof(req));
+    memcpy(&req, payload,
+           hdr->total_size < sizeof(req) ? hdr->total_size : sizeof(req));
+
+    if (req.num_cus > MAX_NUM_CUS) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_PARAM);
+        return;
+    }
+    ctx->num_cus = req.num_cus;
+    for (i = 0; i < req.num_cus; i++) {
+        ctx->cu_cfg[i] = req.cfgs[i];
+    }
+
+    /*
+     * Gercek donanimda bu, CU'larin overlay/PDI imajlarini array'e
+     * yuklemesini tetikler. Overlay yukleme henuz uygulanmadi; ctrlcode
+     * yolu (EXEC_DPU) array'i dogrudan konfigure ettigi icin veri hareketi
+     * yine de dogru calisiyor, ama compute tile programlari yuklenmiyor.
+     */
+    xdna_log(npu, XDNA_LOG_WARN,
+             "MERT: context %u icin %u CU kaydedildi -- overlay/PDI yuklemesi "
+             "uygulanmadi", ctx->id, req.num_cus);
+    mert_reply_status(npu, chan, hdr, AIE2_STATUS_SUCCESS);
+}
+
+/* Bir instruction buffer'i host bellegindin okuyup ctrlcode olarak yurut. */
+static uint32_t run_instruction_buffer(XdnaNpu *npu, XdnaContext *ctx,
+                                       uint64_t inst_addr, uint32_t inst_size)
+{
+    uint8_t *buf;
+    uint32_t status;
+
+    if (!inst_size || inst_size > XDNA_MAX_CTRLCODE_SIZE) {
+        xdna_log(npu, XDNA_LOG_ERROR,
+                 "MERT: gecersiz instruction buffer boyutu %u", inst_size);
+        return AIE2_STATUS_INVALID_INPUT_BUFFER;
+    }
+    buf = malloc(inst_size);
+    if (!buf) {
+        return AIE2_STATUS_MGMT_ERT_NOAVAIL;
+    }
+    if (!npu->ops->dma_read ||
+        npu->ops->dma_read(npu->opaque, inst_addr, buf, inst_size) != 0) {
+        xdna_log(npu, XDNA_LOG_ERROR,
+                 "MERT: instruction buffer okunamadi 0x%llx (%u bayt)",
+                 (unsigned long long)inst_addr, inst_size);
+        free(buf);
+        return AIE2_STATUS_INVALID_INPUT_BUFFER;
+    }
+
+    status = xdna_txn_execute(npu, ctx->id, buf, inst_size) == 0
+                 ? AIE2_STATUS_SUCCESS
+                 : AIE2_STATUS_APP_INVALID_INSTR;
+    free(buf);
+    return status;
+}
+
+static void handle_exec_dpu(XdnaNpu *npu, unsigned chan,
+                            const XdnaMsgHeader *hdr, const uint8_t *payload)
+{
+    ExecDpuReq req;
+    XdnaContext *ctx = ctx_by_chan(npu, chan);
+    uint32_t status;
+
+    if (!ctx) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_MGMT_ERT_INVALID_PARAM);
+        return;
+    }
+    if (hdr->total_size < offsetof(ExecDpuReq, payload)) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+        return;
+    }
+    memset(&req, 0, sizeof(req));
+    memcpy(&req, payload,
+           hdr->total_size < sizeof(req) ? hdr->total_size : sizeof(req));
+
+    status = run_instruction_buffer(npu, ctx, req.inst_buf_addr, req.inst_size);
+    npu->stats.exec_cmds++;
+    mert_reply_status(npu, chan, hdr, status);
+}
+
+static void handle_chain_exec_dpu(XdnaNpu *npu, unsigned chan,
+                                  const XdnaMsgHeader *hdr,
+                                  const uint8_t *payload)
+{
+    CmdChainReq req;
+    CmdChainResp resp = { 0 };
+    XdnaContext *ctx = ctx_by_chan(npu, chan);
+    uint8_t *chain;
+    uint32_t pos = 0;
+    uint32_t i;
+
+    if (!ctx) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_MGMT_ERT_INVALID_PARAM);
+        return;
+    }
+    if (hdr->total_size < sizeof(req)) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+        return;
+    }
+    memcpy(&req, payload, sizeof(req));
+
+    if (!req.buf_size || req.buf_size > XDNA_MAX_CMD_CHAIN_SIZE) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+        return;
+    }
+    chain = malloc(req.buf_size);
+    if (!chain) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_MGMT_ERT_NOAVAIL);
+        return;
+    }
+    if (!npu->ops->dma_read ||
+        npu->ops->dma_read(npu->opaque, req.buf_addr, chain, req.buf_size) != 0) {
+        free(chain);
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+        return;
+    }
+
+    resp.status = AIE2_STATUS_SUCCESS;
+    for (i = 0; i < req.count; i++) {
+        CmdChainSlotDpu slot;
+        uint32_t slot_size, st;
+
+        if (pos + sizeof(slot) > req.buf_size) {
+            resp.status = AIE2_STATUS_INVALID_INPUT_BUFFER;
+            resp.fail_cmd_idx = i;
+            resp.fail_cmd_status = AIE2_STATUS_INVALID_INPUT_BUFFER;
+            break;
+        }
+        memcpy(&slot, chain + pos, sizeof(slot));
+        slot_size = (uint32_t)sizeof(slot) + slot.arg_cnt * 4u;
+        if (pos + slot_size > req.buf_size) {
+            resp.status = AIE2_STATUS_INVALID_INPUT_BUFFER;
+            resp.fail_cmd_idx = i;
+            resp.fail_cmd_status = AIE2_STATUS_INVALID_INPUT_BUFFER;
+            break;
+        }
+
+        st = run_instruction_buffer(npu, ctx, slot.inst_buf_addr,
+                                    slot.inst_size);
+        npu->stats.exec_cmds++;
+        if (st != AIE2_STATUS_SUCCESS) {
+            resp.status = st;
+            resp.fail_cmd_idx = i;
+            resp.fail_cmd_status = st;
+            break;
+        }
+        pos += slot_size;
+    }
+
+    free(chain);
+    mert_reply(npu, chan, hdr, &resp, sizeof(resp));
+}
+
+static void handle_sync_bo(XdnaNpu *npu, unsigned chan,
+                           const XdnaMsgHeader *hdr, const uint8_t *payload)
+{
+    SyncBoReq req;
+    uint8_t chunk[4096];
+    uint32_t done = 0;
+    uint32_t src_type, dst_type;
+
+    if (hdr->total_size < sizeof(req)) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+        return;
+    }
+    memcpy(&req, payload, sizeof(req));
+
+    src_type = req.type & 0xFu;
+    dst_type = (req.type >> 4) & 0xFu;
+
+    /*
+     * SYNC_BO_HOST_MEM = 2, SYNC_BO_DEV_MEM = 0 (aie2_msg_priv.h).
+     * Cihaz bellegi (AIE2_DEVM) modeli henuz yok; host<->host kopyalama
+     * dogru sekilde yapiliyor, digerleri acikca reddediliyor.
+     */
+    if (src_type != SYNC_BO_HOST_MEM || dst_type != SYNC_BO_HOST_MEM) {
+        xdna_log(npu, XDNA_LOG_WARN,
+                 "MERT: SYNC_BO cihaz bellegi yolu uygulanmadi (type 0x%x)",
+                 req.type);
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_OPERATION);
+        return;
+    }
+
+    while (done < req.size) {
+        uint32_t n = req.size - done;
+
+        if (n > sizeof(chunk)) {
+            n = sizeof(chunk);
+        }
+        if (!npu->ops->dma_read || !npu->ops->dma_write ||
+            npu->ops->dma_read(npu->opaque, req.src_addr + done, chunk, n) != 0 ||
+            npu->ops->dma_write(npu->opaque, req.dst_addr + done, chunk, n) != 0) {
+            mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+            return;
+        }
+        done += n;
+    }
     mert_reply_status(npu, chan, hdr, AIE2_STATUS_SUCCESS);
 }
 
@@ -646,21 +940,37 @@ void xdna_mert_handle(XdnaNpu *npu, unsigned chan, const XdnaMsgHeader *hdr,
         return;
     }
 
-    /*
-     * Asagidakiler XDNA array'inin gercek yurutulmesini gerektirir
-     * (yol haritasi asama 6-9). Sessizce "basarili" demek yanlis sonuc
-     * uretir; bu yuzden acikca desteklenmedigini bildiriyoruz.
-     */
     case MSG_OP_CONFIG_CU:
-    case MSG_OP_EXECUTE_BUFFER_CF:
+        handle_config_cu(npu, chan, hdr, payload);
+        return;
+
     case MSG_OP_EXEC_DPU:
-    case MSG_OP_CHAIN_EXEC_BUFFER_CF:
+        handle_exec_dpu(npu, chan, hdr, payload);
+        return;
+
     case MSG_OP_CHAIN_EXEC_DPU:
-    case MSG_OP_CHAIN_EXEC_NPU:
+        handle_chain_exec_dpu(npu, chan, hdr, payload);
+        return;
+
     case MSG_OP_SYNC_BO:
+        handle_sync_bo(npu, chan, hdr, payload);
+        return;
+
     case MSG_OP_CONFIG_DEBUG_BO:
+        /* Debug BO kaydi: array yurutmesini etkilemiyor. */
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_SUCCESS);
+        return;
+
+    /*
+     * Bunlar compute tile'larda gercek program yurutmesi gerektiriyor
+     * (yol haritasi asama 7: AIE instruction interpreter). Sessizce
+     * "basarili" demek yanlis sonuc uretir.
+     */
+    case MSG_OP_EXECUTE_BUFFER_CF:
+    case MSG_OP_CHAIN_EXEC_BUFFER_CF:
+    case MSG_OP_CHAIN_EXEC_NPU:
         xdna_log(npu, XDNA_LOG_WARN,
-                 "MERT: opcode 0x%x henuz uygulanmadi (array asamasi)",
+                 "MERT: opcode 0x%x henuz uygulanmadi (AIE interpreter yok)",
                  hdr->opcode);
         mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_OPERATION);
         return;

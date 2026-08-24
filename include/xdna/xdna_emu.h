@@ -81,6 +81,9 @@ typedef struct XdnaStats {
     uint64_t mbox_msgs_in;
     uint64_t mbox_msgs_out;
     uint64_t irqs_raised;
+    uint64_t exec_cmds;
+    uint64_t dma_bytes;
+    uint64_t txn_ops;
     uint32_t active_contexts;
     int fw_alive;
     int power_on;

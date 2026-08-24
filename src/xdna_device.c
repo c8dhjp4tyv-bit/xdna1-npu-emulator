@@ -59,6 +59,12 @@ XdnaNpu *xdna_npu_new(const XdnaHostOps *ops, void *opaque)
     }
     npu->ops = ops;
     npu->opaque = opaque;
+    npu->array = xdna_array_new(npu);
+    if (!npu->array) {
+        free(npu->sram);
+        free(npu);
+        return NULL;
+    }
     xdna_npu_reset(npu);
     return npu;
 }
@@ -68,6 +74,7 @@ void xdna_npu_free(XdnaNpu *npu)
     if (!npu) {
         return;
     }
+    xdna_array_free(npu->array);
     free(npu->sram);
     free(npu);
 }
@@ -77,12 +84,15 @@ void xdna_npu_reset(XdnaNpu *npu)
     const XdnaHostOps *ops = npu->ops;
     void *opaque = npu->opaque;
     uint8_t *sram = npu->sram;
+    XdnaArray *array = npu->array;
 
     memset(sram, 0, XDNA_BAR_SRAM_SIZE);
     memset(npu, 0, sizeof(*npu));
     npu->ops = ops;
     npu->opaque = opaque;
     npu->sram = sram;
+    npu->array = array;
+    xdna_array_reset(array);
 
     npu->psp_state = XDNA_PSP_COLD;
     npu->power_on = false;
@@ -104,6 +114,10 @@ void xdna_npu_get_stats(const XdnaNpu *npu, XdnaStats *out)
     *out = npu->stats;
     out->fw_alive = npu->fw_alive;
     out->power_on = npu->power_on;
+    if (npu->array) {
+        out->dma_bytes = npu->array->stats.dma_bytes;
+        out->txn_ops = npu->array->stats.txn_ops;
+    }
 }
 
 /* ---------------------------------------------------------------- */

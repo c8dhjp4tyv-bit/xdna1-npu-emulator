@@ -9,11 +9,11 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 | 2 | Surucu boot'u (PSP/SMU/firmware) | **cekirdek tamam, testli** |
 | 3 | Guest IOMMU: SVA/PASID | acik problem |
 | 4 | Yonetim firmware'i (MERT) | **temel mesajlar tamam, testli** |
-| 5 | Bellek modeli (BO, DMA, heap) | baslanmadi |
-| 6 | XDNA array mimari modeli | baslanmadi |
-| 7 | AIE instruction interpreter | acik problem |
-| 8 | ctrlcode motoru | baslanmadi |
-| 9 | Uctan uca gercek workload | baslanmadi |
+| 5 | Bellek modeli (BO, DMA, heap) | **tile bellegi + DMA tamam, testli** |
+| 6 | XDNA array mimari modeli | **tamam; stream switch eksik** |
+| 7 | AIE instruction interpreter | baslanmadi (asil kalan is) |
+| 8 | ctrlcode motoru | **tamam, testli** |
+| 9 | Uctan uca gercek workload | veri hareketi calisiyor; compute eksik |
 | 10 | Uyumluluk + performans | baslanmadi |
 
 ---
@@ -68,9 +68,14 @@ olustur/yok et dongusu limitleriyle birlikte dogru davranir.
 `INVOKE_SELF_TEST`, `CREATE/DESTROY_CONTEXT`, `MAP/ADD_HOST_BUFFER`,
 `REGISTER_ASYNC_EVENT_MSG`, `QUERY_COL_STATUS`, `GET_TELEMETRY`.
 
-Yurutme opcode'lari (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,
-`CHAIN_EXEC_*`, `SYNC_BO`) bilerek **acikca hata donduruyor** -- sessizce
-"basarili" demek yanlis sonuc uretirdi.
+Yurutme yolu da eklendi: `CONFIG_CU`, `EXEC_DPU`, `CHAIN_EXEC_DPU`,
+`SYNC_BO`, `CONFIG_DEBUG_BO`. Bunlar asama 8'deki ctrlcode motoruna
+baglaniyor.
+
+Compute tile programi gerektiren `EXECUTE_BUFFER_CF`,
+`CHAIN_EXEC_BUFFER_CF` ve `CHAIN_EXEC_NPU` bilerek **acikca hata
+donduruyor** -- AIE interpreter olmadan sessizce "basarili" demek yanlis
+sonuc uretirdi.
 
 ## 5. Bellek modeli
 
@@ -79,6 +84,10 @@ tamponu), host bellegine DMA, memory tile'lar.
 
 **Kabul:** guest'ten yazilan bir BO'nun icerigi emulator tarafindan dogru
 okunur; `SYNC_BO` her iki yonde dogru calisir.
+
+**Durum:** shim DMA host bellegini gercekten okuyup yaziyor; memory ve
+compute tile bellekleri modellendi; `SYNC_BO` host-host yolunda calisiyor.
+Cihaz bellegi (AIE2_DEVM) yolu ve BO/IOVA muhasebesi henuz yok.
 
 ## 6. XDNA array mimari modeli
 
@@ -101,6 +110,13 @@ bellegi, durum, lock'lar, giris/cikis stream'leri.
 **Kabul:** `QUERY_COL_STATUS` gercek array durumundan anlamli bir dokum
 uretir (su an sifir dokuyor).
 
+**Durum:** 20 compute tile, 5 memory tile, 5 shim; lock'lar, BD'ler ve DMA
+motorlari `aie-rt`'den dogrulanmis register haritasiyla modellendi.
+Ayrintilar: `docs/04-array-ve-ctrlcode.md`.
+
+Kalan: **stream switch yonlendirmesi**. Su an kolon basina tek FIFO var --
+kolon ici tek yollu akis dogru, kolonlar arasi yonlendirme yok.
+
 ## 7. AIE instruction interpreter
 
 Compute tile ELF'i gercekten decode edilip host CPU'da instruction
@@ -116,6 +132,11 @@ Tipki bir CPU emulatoru gibi. En buyuk belirsizlik burada; bkz.
 **Kabul:** bilinen bir cekirdek (orn. tek tile'lik bir GEMM) bilinen girdi
 icin bit-birebir dogru cikti uretir.
 
+**Durum:** baslanmadi. `CORE_CONTROL` enable yazmasi kabul ediliyor ve
+`core_status` guncelleniyor, ama program yurutulmuyor -- her seferinde
+UYARI loglaniyor, sessizce basarili donmuyor. Bu, projenin kalan en buyuk
+parcasi; `llvm-aie` bulgusu icin `docs/03-acik-sorular.md`.
+
 ## 8. ctrlcode motoru
 
 `XAie_TxnOpcode` transaction'lari islenir ve gercek array durumunu degistirir:
@@ -123,6 +144,11 @@ overlay yukleme, stream switch konfigurasyonu, DMA baslatma, tile
 baslatma/senkronizasyon.
 
 **Kabul:** gercek bir workload'un ctrlcode'u bastan sona hatasiz yurutulur.
+
+**Durum:** transaction bicimi `aie-rt`'den dogrulandi ve yorumlayici yazildi.
+WRITE, MASKWRITE, MASKPOLL, BLOCKWRITE, BLOCKSET uygulandi. Custom op'lar
+(TCT, DDR_PATCH) ve SHIMDMA_BD op'lari **atlaniyor ve uyari veriliyor** --
+payload yerlesimleri dogrulanmadan uygulanmalari yanlis sonuc uretirdi.
 
 ## 9. Uctan uca gercek workload
 
