@@ -17,6 +17,7 @@
 #include "drv_model.h"
 #include "aie2_vectors.h"
 #include "aie2_slot_vectors.h"
+#include "ctrlcode.h"
 
 #define CTRLCODE_ADDR (HOST_MEM_BASE + 0x300000)
 
@@ -259,112 +260,6 @@ static void test_slot_decode(void)
 /* ---------------------------------------------------------------- */
 /* 3. Core enable yolu                                               */
 /* ---------------------------------------------------------------- */
-
-typedef struct {
-    uint8_t Major, Minor, DevGen, NumRows, NumCols, NumMemTileRows;
-    uint32_t NumOps, TxnSize;
-} TxnHeader;
-
-typedef struct { uint8_t Op, Col, Row; } OpHdr;
-
-typedef struct {
-    OpHdr hdr;
-    uint64_t RegOff;
-    uint32_t Value, Size;
-} Write32Hdr;
-
-typedef struct {
-    OpHdr hdr;
-    uint64_t RegOff;
-    uint32_t Value, Mask, Size;
-} MaskPoll32Hdr;
-
-typedef struct {
-    OpHdr hdr;
-    uint8_t Col, Row;
-    uint32_t RegOff, Size;
-} BlockWrite32Hdr;
-
-typedef struct {
-    uint8_t *buf;
-    uint32_t pos;
-    uint32_t ops;
-} TxnBuild;
-
-static void txn_init(TxnBuild *b, uint8_t *buf)
-{
-    memset(b, 0, sizeof(*b));
-    b->buf = buf;
-    b->pos = sizeof(TxnHeader);
-}
-
-static void txn_w32(TxnBuild *b, uint8_t col, uint8_t row, uint32_t off,
-                    uint32_t val)
-{
-    Write32Hdr w;
-
-    memset(&w, 0, sizeof(w));
-    w.hdr.Op = XAIE_IO_WRITE;
-    w.hdr.Col = col;
-    w.hdr.Row = row;
-    w.RegOff = AIE_ADDR(col, row, off);
-    w.Value = val;
-    w.Size = (uint32_t)sizeof(w);
-    memcpy(b->buf + b->pos, &w, sizeof(w));
-    b->pos += (uint32_t)sizeof(w);
-    b->ops++;
-}
-
-static void txn_maskpoll(TxnBuild *b, uint8_t col, uint8_t row, uint32_t off,
-                         uint32_t mask, uint32_t val)
-{
-    MaskPoll32Hdr w;
-
-    memset(&w, 0, sizeof(w));
-    w.hdr.Op = XAIE_IO_MASKPOLL;
-    w.hdr.Col = col;
-    w.hdr.Row = row;
-    w.RegOff = AIE_ADDR(col, row, off);
-    w.Value = val;
-    w.Mask = mask;
-    w.Size = (uint32_t)sizeof(w);
-    memcpy(b->buf + b->pos, &w, sizeof(w));
-    b->pos += (uint32_t)sizeof(w);
-    b->ops++;
-}
-
-static void txn_blockwrite(TxnBuild *b, uint8_t col, uint8_t row, uint32_t off,
-                           const uint32_t *data, uint32_t words)
-{
-    BlockWrite32Hdr w;
-
-    memset(&w, 0, sizeof(w));
-    w.hdr.Op = XAIE_IO_BLOCKWRITE;
-    w.hdr.Col = col;
-    w.hdr.Row = row;
-    w.RegOff = AIE_ADDR(col, row, off);
-    w.Size = (uint32_t)sizeof(w) + words * 4u;
-    memcpy(b->buf + b->pos, &w, sizeof(w));
-    memcpy(b->buf + b->pos + sizeof(w), data, words * 4u);
-    b->pos += w.Size;
-    b->ops++;
-}
-
-static uint32_t txn_finish(TxnBuild *b)
-{
-    TxnHeader h;
-
-    memset(&h, 0, sizeof(h));
-    h.Minor = 1;
-    h.DevGen = 2;
-    h.NumRows = (uint8_t)AIE_NUM_ROWS;
-    h.NumCols = (uint8_t)AIE_NUM_COLS;
-    h.NumMemTileRows = (uint8_t)AIE_MEM_NUM_ROWS;
-    h.NumOps = b->ops;
-    h.TxnSize = b->pos;
-    memcpy(b->buf, &h, sizeof(h));
-    return b->pos;
-}
 
 static int exec_ctrlcode(Drv *d, uint64_t addr, uint32_t size)
 {

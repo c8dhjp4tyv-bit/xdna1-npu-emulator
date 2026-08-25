@@ -148,8 +148,8 @@ static bool txn_tile(TxnCtx *tc, uint8_t col, uint8_t row, uint8_t *out_col)
     return true;
 }
 
-int xdna_txn_execute(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
-                     uint32_t size)
+static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
+                   uint32_t size)
 {
     TxnCtx tc = { 0 };
     TxnHeader hdr;
@@ -189,6 +189,14 @@ int xdna_txn_execute(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
     tc.arr = npu->array;
     tc.col_base = ctx->start_col;
     tc.col_count = ctx->num_col;
+
+    /*
+     * Shim DMA adres cevirisi icin context'in cihaz bellegi penceresi.
+     * Yurutme suresince gecerli; sonunda temizleniyor ki context disinda
+     * kalmis bir pencere yanlislikla kullanilmasin.
+     */
+    npu->array->devm_heap_addr = ctx->heap_addr;
+    npu->array->devm_heap_size = ctx->heap_size;
 
     xdna_log(npu, XDNA_LOG_INFO,
              "ctrlcode: context %u, %u op, %u bayt, devgen %u, %ux%u",
@@ -473,4 +481,18 @@ truncated:
     xdna_log(npu, XDNA_LOG_ERROR, "ctrlcode: op %u tampona sigmiyor (pos %u)",
              op_index, pos);
     return -1;
+}
+
+int xdna_txn_execute(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
+                     uint32_t size)
+{
+    int ret = txn_run(npu, ctx_id, buf, size);
+
+    /*
+     * Cihaz bellegi penceresi yalnizca bu context'in yurutmesi boyunca
+     * gecerli; hata yollarinda da temizlenmeli.
+     */
+    npu->array->devm_heap_addr = 0;
+    npu->array->devm_heap_size = 0;
+    return ret;
 }

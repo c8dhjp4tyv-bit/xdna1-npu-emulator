@@ -13,7 +13,7 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 | 6 | XDNA array mimari modeli | **tamam, stream switch dahil** |
 | 7 | AIE instruction interpreter | **cozme katmani tamam**; semantik yok |
 | 8 | ctrlcode motoru | **tamam, testli** |
-| 9 | Uctan uca gercek workload | veri hareketi calisiyor; compute eksik |
+| 9 | Uctan uca gercek workload | **gercek guest'te veri yolu kostu**; compute eksik |
 | 10 | Uyumluluk + performans | baslanmadi |
 
 ---
@@ -87,12 +87,13 @@ Carveout, surucunun kendi debugfs arayuzunden ayarlanan fiziksel olarak
 surekli bir blok:
 
 ```
-/sys/kernel/debug/accel/<pci-adresi>/carveout  <-  "0x4000000@0x60000000"
+/sys/kernel/debug/accel/<pci-adresi>/carveout  <-  "0x8000000@0x60000000"
 ```
 
 Guest tarafinda hicbir sey degistirilmiyor; bu surucunun kendi ozelligi.
-Bolgeyi cekirdek komut satirinda `memmap=64M$0x60000000` ile ayirmak
-yeterli. Sonrasinda gercek guest'te:
+Bolgeyi cekirdek komut satirinda `memmap=128M$0x60000000` ile ayirmak
+yeterli (cihaz heap'i tam 64 MB olmak zorunda, CMD BO'lari da ayni
+blogtan ayriliyor). Sonrasinda gercek guest'te:
 
 ```
 /dev/accel/accel0 ACILDI (carveout ile, fd=3)
@@ -149,8 +150,17 @@ isliyor (host/dev x host/dev): cihaz adresleri
 `heap_addr + (D - AIE2_DEVM_BASE)` ile context'in host heap'ine
 cevriliyor, heap disi adresler reddediliyor.
 
-Kalan: BO/IOVA muhasebesi ve BD adreslerinde cihaz adresi cevirisi
-(gercek ctrlcode bunlari DDR_PATCH ile yamiyor).
+**Shim BD adresleri de cevriliyor.** Gercek akista ctrlcode'daki shim BD
+adreslerini XRT `DDR_PATCH` ile yamiyor ve oraya argüman BO'sunun cihaz
+adresini koyuyor. Emulator, cihaz bellegi penceresine
+([`AIE2_DEVM_BASE`, `+AIE2_DEVM_SIZE`), `aie2_pci.h`) dusen shim BD
+adreslerini context heap'ine ceviriyor; pencere disindakiler host IOVA'si
+sayiliyor (paylasimli BO'lar gercekten oyle adresleniyor). Ayni ceviri
+komut listesi tamponu ve instruction buffer icin de yapiliyor -- gercek
+guest'te bu adreslerin hepsi cihaz adresi geliyor.
+
+Kalan: BO/IOVA muhasebesi ve `DDR_PATCH` op'unun kendisinin uygulanmasi
+(yama yuku dogrulandi, komut argüman yerlesimi dogrulanmadi).
 
 ## 6. XDNA array mimari modeli
 
@@ -355,6 +365,47 @@ Yalnizca cikti degil; context davranisi, DMA sirasi, interrupt'lar, hatalar,
 tile durumu ve register'lar da karsilastirilir.
 
 Bu asamaya ulasildiginda proje "xrt-smi spoof" olmaktan tamamen cikar.
+
+**Durum:** veri yolu **gercek guest'te uctan uca kostu**; compute eksik.
+
+```
+guest userspace
+  |  ctrlcode uretir (tests/ctrlcode.h -- testlerle AYNI kod)
+  |  DRM_IOCTL_AMDXDNA_EXEC_CMD, ERT_START_NPU
+  v
+stock amdxdna  ->  mailbox MSG_OP_CHAIN_EXEC_DPU
+  v
+emulator MERT  ->  ctrlcode yorumlayicisi  ->  XDNA array
+  |  shim MM2S -> memory tile (lock 0) -> shim S2MM
+  v
+cikis BO'su == giris BO'su  (256 bayt, birebir)
+```
+
+Guest ciktisi:
+
+```
+CONFIG_HWCTX(CU)       = tamam
+ctrlcode               = 720 bayt
+EXEC_CMD               = seq 0
+SYNCOBJ_TIMELINE_WAIT  = tamam (nokta 0)
+komut durumu           = 4 (COMPLETED)
+SONUC                  = cikis girisle BIREBIR AYNI (256 bayt)
+```
+
+Bunun icin gereken iki gercek duzeltme:
+
+- **Cihaz adresi cevirisi her yerde.** Komut listesi tamponu, instruction
+  buffer ve shim BD adresleri hep cihaz adresi (`AIE2_DEVM_BASE` tabanli)
+  tasiyor; hepsi context heap'ine cevriliyor. Sinir `aie2_pci.h`den:
+  pencere [`AIE2_DEVM_BASE`, `+AIE2_DEVM_SIZE`), disi host IOVA'si.
+- **QEMU vIOMMU secimi.** BO'lar IOVA ile adreslendigi icin aygit DMA'sinin
+  cevrilmesi sart. QEMU'nun `intel-iommu`'su ceviriyor, `amd-iommu`'su
+  cevirmiyor -- `amd` ile emulator BO'lari okuyamiyor (cevrilmemis IOVA
+  RAM'in disina dusuyor). `run.sh` varsayilani `intel`.
+
+**Kalan:** compute (asama 7) ve gercek Hawk Point ile yan yana
+karsilastirma. Yani kabul kriteri henuz kapanmadi: veri hareketi dogru,
+hesap yok.
 
 ## 10. Uyumluluk ve hiz
 

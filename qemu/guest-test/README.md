@@ -16,8 +16,8 @@ Bu dizin, emulatoru **gercek bir Linux guest'i icinde degistirilmemis
   ext cap @0x140 id=0x0013 (PRI)
   ext cap @0x180 id=0x001b (PASID)
   /dev/accel/accel0 ACILAMADI (SVA yok)
-  carveout ayarlandi: 0x4000000@0x60000000
-  /sys/kernel/debug/accel/0000:00:03.0/carveout = 0x4000000@0x60000000
+  carveout ayarlandi: 0x8000000@0x60000000
+  /sys/kernel/debug/accel/0000:00:03.0/carveout = 0x8000000@0x60000000
   /dev/accel/accel0 ACILDI (carveout ile, fd=3)
   --- DRM ioctl'leri (stock UAPI) ---
   QUERY_AIE_VERSION      = 2.0
@@ -26,8 +26,16 @@ Bu dizin, emulatoru **gercek bir Linux guest'i icinde degistirilmemis
     core: 4 satir @2, mem: 1 satir @1, shim: 1 satir @0
   CREATE_BO(DEV_HEAP)    = handle 1, 67108864 bayt
   GET_BO_INFO            = xdna_addr 0x4000000, map_offset 0x100000000
-  heap mmap              = 0x7febab18c000
+  heap mmap              = 0x7f1325f71000
   CREATE_HWCTX           = handle 1, syncobj 1
+  --- uctan uca workload ---
+  BO'lar                 = inst 0x4020000, in 0x4030000, out 0x4038000
+  CONFIG_HWCTX(CU)       = tamam
+  ctrlcode               = 720 bayt
+  EXEC_CMD               = seq 0
+  SYNCOBJ_TIMELINE_WAIT  = tamam (nokta 0)
+  komut durumu           = 4 (COMPLETED)
+  SONUC                  = cikis girisle BIREBIR AYNI (256 bayt)
   DESTROY_HWCTX          = tamam
 ########## TEST BITTI ##########
 ```
@@ -43,7 +51,45 @@ Yani stock surucu:
 - `/dev/accel/accel0` olusturdu,
 - **`/dev/accel/accel0` acildi** ve DRM ioctl'leri emulatordan gercek
   degerler dondurdu,
-- **donanim context'i olusturuldu ve yok edildi**.
+- **donanim context'i olusturuldu ve yok edildi**,
+- **gercek bir workload uctan uca kostu ve dogru cikti uretti**.
+
+### Uctan uca yol
+
+```
+guest userspace
+  |  ctrlcode uretir (XAie transaction, tests/ctrlcode.h -- testlerle AYNI kod)
+  |  DRM_IOCTL_AMDXDNA_EXEC_CMD  (ERT_START_NPU)
+  v
+stock amdxdna surucusu
+  |  MSG_OP_CHAIN_EXEC_DPU  (mailbox)
+  v
+emulator MERT
+  |  komut listesi tamponunu cihaz adresinden okur, slot'lari cozer
+  v
+ctrlcode yorumlayicisi
+  |  BD'leri programlar, stream switch'i kurar, DMA'lari calistirir
+  v
+XDNA array:  shim MM2S -> memory tile (lock 0) -> shim S2MM
+  v
+cikis BO'su -- giris BO'suyla BIREBIR AYNI (256 bayt)
+```
+
+Guest tarafinda degistirilmis hicbir sey yok: stock `amdxdna`, stock DRM
+UAPI, stock DRM syncobj. Emulator tarafinda da kisayol yok -- veri
+gercekten modellenmis shim DMA, memory tile ve stream switch uzerinden
+geciyor.
+
+Iki nokta:
+
+- **Adresler cihaz adresi.** Komut listesi tamponu ve instruction buffer
+  heap'ten ayrilmis DEV BO'lar, yani adresleri `AIE2_DEVM_BASE` tabanli.
+  Emulator bunlari context heap'ine ceviriyor. Ayni sey shim BD
+  adresleri icin de gecerli (gercek akista XRT `DDR_PATCH` ile yaziyor).
+- **`WAIT_CMD` ioctl'i bu surucude yok** (`cmd_wait` isleyicisi tanimli
+  degil, `-EOPNOTSUPP`). Tamamlanma `CREATE_HWCTX`'in dondurdugu DRM
+  timeline syncobj ile bekleniyor; komutun ERT durumu da CMD BO
+  basligindan okunuyor (4 = COMPLETED).
 
 ### SVA engeli ve surucunun kendi yedek yolu: carveout
 
@@ -62,7 +108,7 @@ debugfs arayuzunden ayarlanan, fiziksel olarak surekli bir bellek blogu:
 Bu **stock surucunun kendi ozelligi**; guest tarafinda hicbir sey
 degistirilmiyor. Tek gereken, o fiziksel bolgenin kernel tarafindan
 kullanilmiyor olmasi -- `run.sh` cekirdek komut satirina
-`memmap=64M$0x60000000` ekliyor, `init.c` de `0x4000000@0x60000000`
+`memmap=128M$0x60000000` ekliyor, `init.c` de `0x8000000@0x60000000`
 yaziyor.
 
 Sonrasinda BO'lar bu blogtan ayriliyor ve `CREATE_HWCTX` calisiyor.
@@ -103,7 +149,8 @@ make -j$(nproc) bzImage
 ```sh
 mkdir -p initramfs/{proc,sys,dev,lib/firmware/amdnpu/1502_00}
 # UAPI basliklari kernel kaynagindan geliyor (DRM ioctl'leri icin).
-gcc -static -O2 -Wno-cpp -I/path/to/linux/include/uapi \
+gcc -static -O2 -Wno-cpp \
+    -I/path/to/linux/include/uapi -I../../tests -I../../include \
     -o initramfs/init init.c
 # Surucu firmware dosyasinin VAR OLMASINI bekliyor; icerigi onemli degil,
 # emulator yalnizca okunabilirligini dogruluyor.
@@ -115,10 +162,11 @@ head -c 262144 /dev/urandom > initramfs/lib/firmware/amdnpu/1502_00/npu.sbin
 ```sh
 QEMU=/path/to/qemu-system-x86_64 \
 BZIMAGE=/path/to/bzImage \
-IOMMU=amd ./run.sh
+IOMMU=intel ./run.sh          # varsayilan
 ```
 
-`IOMMU=intel` PASID destekli vIOMMU ile dener (SVA hala baglanmiyor).
+`IOMMU=amd` da denenebilir; probe geciyor ama uctan uca workload
+calismiyor (asagidaki kisitlara bakin).
 
 ## Bilinen kisitlar
 
@@ -136,3 +184,11 @@ IOMMU=amd ./run.sh
 - **SVA baglanmiyor.** `/dev/accel/accel0` acmak icin carveout yolu
   kullaniliyor (yukariya bakin). Bu, `CONFIG_DEBUG_FS=y` ve debugfs'in
   bagli olmasini gerektiriyor.
+- **vIOMMU secimi onemli.** Uctan uca workload yalnizca `IOMMU=intel`
+  (varsayilan) ile calisiyor: BO'lar IOVA ile adresleniyor ve QEMU'nun
+  `amd-iommu`'su aygit DMA'sini cevirmiyor, `intel-iommu` ceviriyor.
+  `IOMMU=amd` ile probe ve sorgular geciyor ama emulator BO'lari
+  okuyamiyor (cevrilmemis IOVA RAM'in disina dusuyor).
+- **Carveout 128 MB olmali.** Cihaz heap'i tam 64 MB olmak zorunda
+  (surucu `dev_heap_max_size`in kati istiyor) ve CMD/SHARE BO'lari da
+  ayni blogtan ayriliyor.

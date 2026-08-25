@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "drv_model.h"
+#include "ctrlcode.h"
 
 /* Host bellek yerlesimi (FW imaji 0x10000..0x50000 arasinda) */
 #define CTRLCODE_ADDR (HOST_MEM_BASE + 0x300000)
@@ -55,274 +56,7 @@ typedef struct { uint32_t status, type; } AsyncEventResp;
 
 #define XFER_WORDS 64u
 #define XFER_BYTES (XFER_WORDS * 4u)
-#define MEMT_WORD_OFF 0x100u   /* memory tile icinde 1024. bayt */
-
-/* ---------------------------------------------------------------- */
-/* ctrlcode uretici -- aie-rt serilestirme bicimi                    */
-/* ---------------------------------------------------------------- */
-
-typedef struct {
-    uint8_t Major, Minor, DevGen, NumRows, NumCols, NumMemTileRows;
-    uint32_t NumOps, TxnSize;
-} TxnHeader;
-
-typedef struct {
-    uint8_t Op, Col, Row;
-} OpHdr;
-
-typedef struct {
-    OpHdr hdr;
-    uint64_t RegOff;
-    uint32_t Value, Size;
-} Write32Hdr;
-
-typedef struct {
-    OpHdr hdr;
-    uint64_t RegOff;
-    uint32_t Value, Mask, Size;
-} MaskPoll32Hdr;
-
-typedef struct {
-    OpHdr hdr;
-    uint8_t Col, Row;
-    uint32_t RegOff, Size;
-} BlockWrite32Hdr;
-
-typedef struct {
-    uint8_t *buf;
-    uint32_t pos;
-    uint32_t ops;
-} TxnBuild;
-
-static void txn_init(TxnBuild *b, uint8_t *buf)
-{
-    memset(b, 0, sizeof(*b));
-    b->buf = buf;
-    b->pos = sizeof(TxnHeader);
-}
-
-static void txn_w32(TxnBuild *b, uint8_t col, uint8_t row, uint32_t off,
-                    uint32_t val)
-{
-    Write32Hdr w;
-
-    memset(&w, 0, sizeof(w));
-    w.hdr.Op = XAIE_IO_WRITE;
-    w.hdr.Col = col;
-    w.hdr.Row = row;
-    w.RegOff = AIE_ADDR(col, row, off);
-    w.Value = val;
-    w.Size = (uint32_t)sizeof(w);
-    memcpy(b->buf + b->pos, &w, sizeof(w));
-    b->pos += (uint32_t)sizeof(w);
-    b->ops++;
-}
-
-static void txn_maskpoll(TxnBuild *b, uint8_t col, uint8_t row, uint32_t off,
-                         uint32_t mask, uint32_t val)
-{
-    MaskPoll32Hdr w;
-
-    memset(&w, 0, sizeof(w));
-    w.hdr.Op = XAIE_IO_MASKPOLL;
-    w.hdr.Col = col;
-    w.hdr.Row = row;
-    w.RegOff = AIE_ADDR(col, row, off);
-    w.Value = val;
-    w.Mask = mask;
-    w.Size = (uint32_t)sizeof(w);
-    memcpy(b->buf + b->pos, &w, sizeof(w));
-    b->pos += (uint32_t)sizeof(w);
-    b->ops++;
-}
-
-static void txn_blockwrite(TxnBuild *b, uint8_t col, uint8_t row, uint32_t off,
-                           const uint32_t *data, uint32_t words)
-{
-    BlockWrite32Hdr w;
-
-    memset(&w, 0, sizeof(w));
-    w.hdr.Op = XAIE_IO_BLOCKWRITE;
-    w.hdr.Col = col;
-    w.hdr.Row = row;
-    w.RegOff = AIE_ADDR(col, row, off);
-    w.Size = (uint32_t)sizeof(w) + words * 4u;
-    memcpy(b->buf + b->pos, &w, sizeof(w));
-    memcpy(b->buf + b->pos + sizeof(w), data, words * 4u);
-    b->pos += w.Size;
-    b->ops++;
-}
-
-/* Sabit boyutlu op'lar: yalnizca opcode + dolgu, Size alani YOK. */
-static void txn_fixed_op(TxnBuild *b, uint8_t opcode, uint32_t total_size)
-{
-    memset(b->buf + b->pos, 0, total_size);
-    b->buf[b->pos] = opcode;
-    b->pos += total_size;
-    b->ops++;
-}
-
-/* TCT custom op: CustomOpHdr + {word, config} */
-static void txn_tct(TxnBuild *b, uint8_t col, uint8_t row, uint8_t chan,
-                    bool mm2s)
-{
-    struct { OpHdr hdr; uint32_t Size; } c;
-    uint32_t payload[2];
-
-    memset(&c, 0, sizeof(c));
-    c.hdr.Op = XAIE_IO_CUSTOM_OP_TCT;
-    c.Size = (uint32_t)sizeof(c) + (uint32_t)sizeof(payload);
-    payload[0] = ((uint32_t)col << 16) | ((uint32_t)row << 8) |
-                 (mm2s ? 1u : 0u);
-    payload[1] = (uint32_t)chan << 24;
-    memcpy(b->buf + b->pos, &c, sizeof(c));
-    memcpy(b->buf + b->pos + sizeof(c), payload, sizeof(payload));
-    b->pos += c.Size;
-    b->ops++;
-}
-
-static uint32_t txn_finish(TxnBuild *b)
-{
-    TxnHeader h;
-
-    memset(&h, 0, sizeof(h));
-    h.Major = 0;
-    h.Minor = 1;
-    h.DevGen = 2;               /* AIE-ML */
-    h.NumRows = (uint8_t)AIE_NUM_ROWS;
-    h.NumCols = (uint8_t)AIE_NUM_COLS;
-    h.NumMemTileRows = (uint8_t)AIE_MEM_NUM_ROWS;
-    h.NumOps = b->ops;
-    h.TxnSize = b->pos;
-    memcpy(b->buf, &h, sizeof(h));
-    return b->pos;
-}
-
-/* ---------------------------------------------------------------- */
-/* Test ctrlcode'lari                                                */
-/* ---------------------------------------------------------------- */
-
-static uint32_t shim_bd(uint32_t bd, uint32_t word)
-{
-    return AIEML_SHIM_DMA_BD0 + bd * AIE_BD_STRIDE + word * 4u;
-}
-
-static uint32_t memt_bd(uint32_t bd, uint32_t word)
-{
-    return AIEML_MEMT_DMA_BD0 + bd * AIE_BD_STRIDE + word * 4u;
-}
-
-/*
- * Stream switch port indeksleri -- aie-rt register siralamasindan
- * (offset sirasi = port indeksi):
- *
- *   shim slave : TILE_CTRL, FIFO_0, SOUTH_0..7, WEST_0..3, NORTH_0..3,
- *                EAST_0..3, TRACE
- *   shim master: TILE_CTRL, FIFO0, SOUTH0..5, WEST0..3, NORTH0..5, EAST0..3
- *   memt slave : DMA_0..5, TILE_CTRL, SOUTH_0..5, NORTH_0..3, TRACE
- *   memt master: DMA0..5, TILE_CTRL, SOUTH0..3, NORTH0..5
- */
-#define SHIM_SLAVE_SOUTH(n)   (2u + (n))
-#define SHIM_SLAVE_NORTH(n)   (14u + (n))
-#define SHIM_MASTER_SOUTH(n)  (2u + (n))
-#define SHIM_MASTER_NORTH(n)  (12u + (n))
-#define MEMT_SLAVE_DMA(n)     (0u + (n))
-#define MEMT_SLAVE_SOUTH(n)   (7u + (n))
-#define MEMT_MASTER_DMA(n)    (0u + (n))
-#define MEMT_MASTER_SOUTH(n)  (7u + (n))
-
-#define SS_MASTER(base, port)  ((base) + (port) * 4u)
-#define SS_ENABLE(slave_port) \
-    (AIE_SS_MASTER_ENABLE_MASK | ((slave_port) & AIE_SS_MASTER_CFG_MASK))
-
-/*
- * Yonlendirmeyi kur:
- *
- *   host -> shim MM2S ch0 -> shim slave SOUTH_3 -> shim master NORTH0
- *        -> memtile slave SOUTH_0 -> memtile master DMA0 (S2MM ch0)
- *
- *   memtile MM2S ch0 -> memtile slave DMA_0 -> memtile master SOUTH0
- *        -> shim slave NORTH_0 -> shim master SOUTH2 (S2MM ch0) -> host
- *
- * Gercek ctrlcode da bu registerlari boyle programliyor; stream switch
- * konfigure edilmezse veri hicbir yere gitmez.
- */
-static void txn_config_stream_switch(TxnBuild *b)
-{
-    /* --- host -> array --- */
-    /* shim MUX: SOUTH3 alani (LSB 10) DMA'ya baglansin */
-    txn_w32(b, 0, 0, AIEML_SHIM_MUX_CONFIG, AIE_MUX_TYPE_DMA << 10);
-    txn_w32(b, 0, 0, SS_MASTER(AIEML_SHIM_SS_SLAVE, SHIM_SLAVE_SOUTH(3)),
-            AIE_SS_SLAVE_ENABLE_MASK);
-    txn_w32(b, 0, 0, SS_MASTER(AIEML_SHIM_SS_MASTER, SHIM_MASTER_NORTH(0)),
-            SS_ENABLE(SHIM_SLAVE_SOUTH(3)));
-    txn_w32(b, 0, 1, SS_MASTER(AIEML_MEMT_SS_SLAVE, MEMT_SLAVE_SOUTH(0)),
-            AIE_SS_SLAVE_ENABLE_MASK);
-    txn_w32(b, 0, 1, SS_MASTER(AIEML_MEMT_SS_MASTER, MEMT_MASTER_DMA(0)),
-            SS_ENABLE(MEMT_SLAVE_SOUTH(0)));
-
-    /* --- array -> host --- */
-    txn_w32(b, 0, 1, SS_MASTER(AIEML_MEMT_SS_SLAVE, MEMT_SLAVE_DMA(0)),
-            AIE_SS_SLAVE_ENABLE_MASK);
-    txn_w32(b, 0, 1, SS_MASTER(AIEML_MEMT_SS_MASTER, MEMT_MASTER_SOUTH(0)),
-            SS_ENABLE(MEMT_SLAVE_DMA(0)));
-    txn_w32(b, 0, 0, SS_MASTER(AIEML_SHIM_SS_SLAVE, SHIM_SLAVE_NORTH(0)),
-            AIE_SS_SLAVE_ENABLE_MASK);
-    txn_w32(b, 0, 0, SS_MASTER(AIEML_SHIM_SS_MASTER, SHIM_MASTER_SOUTH(2)),
-            SS_ENABLE(SHIM_SLAVE_NORTH(0)));
-    /* shim DEMUX: SOUTH2 alani (LSB 4) DMA'ya baglansin */
-    txn_w32(b, 0, 0, AIEML_SHIM_DEMUX_CONFIG, AIE_MUX_TYPE_DMA << 4);
-}
-
-/* host -> memory tile -> host yolunu kuran ctrlcode. */
-static uint32_t build_loopback_ctrlcode(uint8_t *buf, uint64_t in_addr,
-                                        uint64_t out_addr)
-{
-    TxnBuild b;
-
-    txn_init(&b, buf);
-    txn_config_stream_switch(&b);
-
-    /* --- shim MM2S: host girisini stream switch'e bas --- */
-    txn_w32(&b, 0, 0, shim_bd(0, AIE_SHIM_BD_LEN_WORD), XFER_WORDS);
-    txn_w32(&b, 0, 0, shim_bd(0, AIE_SHIM_BD_ADDRLO_WORD),
-            (uint32_t)in_addr & AIE_SHIM_BD_ADDRLO_MASK);
-    txn_w32(&b, 0, 0, shim_bd(0, AIE_SHIM_BD_ADDRHI_WORD),
-            (uint32_t)(in_addr >> 32) & AIE_SHIM_BD_ADDRHI_MASK);
-    txn_w32(&b, 0, 0, shim_bd(0, AIE_SHIM_BD_CTRL_WORD),
-            1u << AIE_SHIM_BD_VALID_LSB);
-    txn_w32(&b, 0, 0, AIEML_SHIM_DMA_MM2S0_CTRL + AIEML_DMA_QUEUE_OFF, 0);
-
-    /* --- memory tile S2MM: stream'i tile bellegine yaz, lock 0 release --- */
-    txn_w32(&b, 0, 1, memt_bd(0, AIE_MEMT_BD_LEN_WORD), XFER_WORDS);
-    txn_w32(&b, 0, 1, memt_bd(0, AIE_MEMT_BD_ADDR_WORD), MEMT_WORD_OFF);
-    txn_w32(&b, 0, 1, memt_bd(0, AIE_MEMT_BD_CTRL_WORD),
-            (1u << AIE_MEMT_BD_VALID_LSB) | (1u << AIE_MEMT_BD_REL_VAL_LSB));
-    txn_w32(&b, 0, 1, AIEML_MEMT_DMA_S2MM0_CTRL + AIEML_DMA_QUEUE_OFF, 0);
-
-    /* --- senkronizasyon: lock 0 degerinin 1 olmasini bekle --- */
-    txn_maskpoll(&b, 0, 1, AIEML_MEMT_LOCK0_VALUE, 0xFFu, 1u);
-
-    /* --- memory tile MM2S: lock 0 acquire, tile bellegini stream'e bas --- */
-    txn_w32(&b, 0, 1, memt_bd(1, AIE_MEMT_BD_LEN_WORD), XFER_WORDS);
-    txn_w32(&b, 0, 1, memt_bd(1, AIE_MEMT_BD_ADDR_WORD), MEMT_WORD_OFF);
-    txn_w32(&b, 0, 1, memt_bd(1, AIE_MEMT_BD_CTRL_WORD),
-            (1u << AIE_MEMT_BD_VALID_LSB) | (1u << AIE_MEMT_BD_ACQ_EN_LSB) |
-                (1u << AIE_MEMT_BD_ACQ_VAL_LSB));
-    txn_w32(&b, 0, 1, AIEML_MEMT_DMA_MM2S0_CTRL + AIEML_DMA_QUEUE_OFF, 1);
-
-    /* --- shim S2MM: stream'i host cikisina yaz --- */
-    txn_w32(&b, 0, 0, shim_bd(1, AIE_SHIM_BD_LEN_WORD), XFER_WORDS);
-    txn_w32(&b, 0, 0, shim_bd(1, AIE_SHIM_BD_ADDRLO_WORD),
-            (uint32_t)out_addr & AIE_SHIM_BD_ADDRLO_MASK);
-    txn_w32(&b, 0, 0, shim_bd(1, AIE_SHIM_BD_ADDRHI_WORD),
-            (uint32_t)(out_addr >> 32) & AIE_SHIM_BD_ADDRHI_MASK);
-    txn_w32(&b, 0, 0, shim_bd(1, AIE_SHIM_BD_CTRL_WORD),
-            1u << AIE_SHIM_BD_VALID_LSB);
-    txn_w32(&b, 0, 0, AIEML_SHIM_DMA_S2MM0_CTRL + AIEML_DMA_QUEUE_OFF, 1);
-
-    return txn_finish(&b);
-}
+#define MEMT_WORD_OFF CTRLCODE_MEMT_WORD_OFF
 
 /* ---------------------------------------------------------------- */
 
@@ -399,7 +133,7 @@ static void test_exec(Host *host, XdnaNpu *npu)
         in[i] = (uint8_t)(i * 7u + 3u);
     }
     memset(out, 0, XFER_BYTES);
-    cc_size = build_loopback_ctrlcode(cc, INPUT_ADDR, OUTPUT_ADDR);
+    cc_size = build_loopback_ctrlcode(cc, INPUT_ADDR, OUTPUT_ADDR, XFER_WORDS);
     CHECK(cc_size > sizeof(TxnHeader), "ctrlcode uretildi (%u bayt)", cc_size);
 
     step("EXEC_DPU ile ctrlcode calistir");
@@ -690,6 +424,36 @@ static void test_exec(Host *host, XdnaNpu *npu)
         CHECK(mbox_send_recv(&ctxd, MSG_OP_SYNC_BO, &req, sizeof(req), &st,
                              sizeof(st)) == 0, "sinir disi sync bo cevabi");
         CHECK(st.status != 0, "heap disi cihaz adresi reddedilmeli");
+    }
+
+    /*
+     * Gercek akista shim BD adreslerini XRT yamiyor ve oraya argüman
+     * BO'sunun CIHAZ adresini yaziyor. Cihaz bellegi BO'lari context
+     * heap'inden ayrildigi icin bu adresler AIE2_DEVM penceresinde oluyor.
+     */
+    step("Shim DMA: cihaz adresleri heap'e cevrilmeli");
+    {
+        uint64_t heap = HOST_MEM_BASE + 0x500000;   /* yukarida bildirildi */
+        uint8_t *heap_p = host_ptr(host, heap);
+        uint64_t dev_in = AIE2_DEVM_BASE + 0x8000;
+        uint64_t dev_out = AIE2_DEVM_BASE + 0xC000;
+        uint32_t size;
+
+        for (i = 0; i < XFER_BYTES; i++) {
+            heap_p[0x8000 + i] = (uint8_t)(i * 11u + 5u);
+        }
+        memset(heap_p + 0xC000, 0, XFER_BYTES);
+
+        size = build_loopback_ctrlcode(cc, dev_in, dev_out, XFER_WORDS);
+        CHECK_EQ(exec_ctrlcode(&ctxd, CTRLCODE_ADDR, size), 0,
+                 "cihaz adresli ctrlcode durumu");
+        CHECK(memcmp(heap_p + 0x8000, heap_p + 0xC000, XFER_BYTES) == 0,
+              "veri cihaz adresleriyle array uzerinden gecmedi");
+
+        /* Pencere icinde ama heap disinda kalan adres reddedilmeli. */
+        size = build_loopback_ctrlcode(cc, AIE2_DEVM_BASE + 0x100000, dev_out, XFER_WORDS);
+        CHECK(exec_ctrlcode(&ctxd, CTRLCODE_ADDR, size) != 0,
+              "heap disi shim adresi reddedilmeli");
     }
 
     step("Asenkron hata bildirimi");

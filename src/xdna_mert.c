@@ -539,16 +539,43 @@ static void handle_config_cu(XdnaNpu *npu, unsigned chan,
     mert_reply_status(npu, chan, hdr, AIE2_STATUS_SUCCESS);
 }
 
+static bool devm_to_host(XdnaNpu *npu, const XdnaContext *ctx,
+                         uint64_t dev_addr, uint32_t size, uint64_t *host_addr);
+
+/*
+ * Firmware'e gelen tampon adresleri gercek akista CIHAZ adresleridir:
+ * hem instruction buffer hem komut listesi tamponu context heap'inden
+ * ayrilmis DEV BO'lardir (aie2_message.c: init_chain_req'e
+ * `amdxdna_gem_dev_addr(cmdbuf_abo)` veriliyor).
+ *
+ * Cihaz bellegi penceresi SINIRLI: [AIE2_DEVM_BASE, +AIE2_DEVM_SIZE).
+ * Disindaki adresler host adresi (IOVA) sayiliyor.
+ */
+static bool resolve_dev_addr(XdnaNpu *npu, const XdnaContext *ctx,
+                             uint64_t addr, uint32_t size, uint64_t *out)
+{
+    if (addr < AIE2_DEVM_BASE ||
+        addr >= (uint64_t)AIE2_DEVM_BASE + AIE2_DEVM_SIZE) {
+        *out = addr;
+        return true;
+    }
+    return devm_to_host(npu, ctx, addr, size, out);
+}
+
 /* Bir instruction buffer'i host bellegindin okuyup ctrlcode olarak yurut. */
 static uint32_t run_instruction_buffer(XdnaNpu *npu, XdnaContext *ctx,
                                        uint64_t inst_addr, uint32_t inst_size)
 {
     uint8_t *buf;
     uint32_t status;
+    uint64_t host_addr;
 
     if (!inst_size || inst_size > XDNA_MAX_CTRLCODE_SIZE) {
         xdna_log(npu, XDNA_LOG_ERROR,
                  "MERT: gecersiz instruction buffer boyutu %u", inst_size);
+        return AIE2_STATUS_INVALID_INPUT_BUFFER;
+    }
+    if (!resolve_dev_addr(npu, ctx, inst_addr, inst_size, &host_addr)) {
         return AIE2_STATUS_INVALID_INPUT_BUFFER;
     }
     buf = malloc(inst_size);
@@ -556,7 +583,7 @@ static uint32_t run_instruction_buffer(XdnaNpu *npu, XdnaContext *ctx,
         return AIE2_STATUS_MGMT_ERT_NOAVAIL;
     }
     if (!npu->ops->dma_read ||
-        npu->ops->dma_read(npu->opaque, inst_addr, buf, inst_size) != 0) {
+        npu->ops->dma_read(npu->opaque, host_addr, buf, inst_size) != 0) {
         xdna_log(npu, XDNA_LOG_ERROR,
                  "MERT: instruction buffer okunamadi 0x%llx (%u bayt)",
                  (unsigned long long)inst_addr, inst_size);
@@ -590,6 +617,10 @@ static void handle_exec_dpu(XdnaNpu *npu, unsigned chan,
     memcpy(&req, payload,
            hdr->total_size < sizeof(req) ? hdr->total_size : sizeof(req));
 
+    xdna_log(npu, XDNA_LOG_DEBUG,
+             "MERT: EXEC_DPU addr 0x%llx, %u bayt, CU %u",
+             (unsigned long long)req.inst_buf_addr, req.inst_size,
+             req.cu_idx);
     status = run_instruction_buffer(npu, ctx, req.inst_buf_addr, req.inst_size);
     npu->stats.exec_cmds++;
     mert_reply_status(npu, chan, hdr, status);
@@ -603,6 +634,7 @@ static void handle_chain_exec_dpu(XdnaNpu *npu, unsigned chan,
     CmdChainResp resp = { 0 };
     XdnaContext *ctx = ctx_by_chan(npu, chan);
     uint8_t *chain;
+    uint64_t chain_addr;
     uint32_t pos = 0;
     uint32_t i;
 
@@ -620,17 +652,26 @@ static void handle_chain_exec_dpu(XdnaNpu *npu, unsigned chan,
         mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
         return;
     }
+    if (!resolve_dev_addr(npu, ctx, req.buf_addr, req.buf_size, &chain_addr)) {
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+        return;
+    }
     chain = malloc(req.buf_size);
     if (!chain) {
         mert_reply_status(npu, chan, hdr, AIE2_STATUS_MGMT_ERT_NOAVAIL);
         return;
     }
     if (!npu->ops->dma_read ||
-        npu->ops->dma_read(npu->opaque, req.buf_addr, chain, req.buf_size) != 0) {
+        npu->ops->dma_read(npu->opaque, chain_addr, chain, req.buf_size) != 0) {
         free(chain);
         mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
         return;
     }
+
+    xdna_log(npu, XDNA_LOG_DEBUG,
+             "MERT: komut zinciri, tampon 0x%llx -> 0x%llx, %u bayt, %u komut",
+             (unsigned long long)req.buf_addr, (unsigned long long)chain_addr,
+             req.buf_size, req.count);
 
     resp.status = AIE2_STATUS_SUCCESS;
     for (i = 0; i < req.count; i++) {

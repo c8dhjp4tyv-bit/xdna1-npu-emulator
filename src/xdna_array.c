@@ -834,6 +834,42 @@ static void bd_decode(const AieTile *t, uint32_t idx, AieBd *bd)
 
 #define DMA_CHUNK 4096u
 
+/*
+ * Shim DMA tanimlayicisindaki adresi host adresine cevir.
+ *
+ * Gercek akista ctrlcode'daki shim BD adreslerini XRT yamiyor (DDR_PATCH)
+ * ve oraya argüman BO'sunun CIHAZ adresini yaziyor. Cihaz bellegi BO'lari
+ * context heap'inden ayrildigi icin bu adres AIE2_DEVM_BASE tabanlidir --
+ * surucunun MAP_HOST_BUFFER ile bildirdigi heap penceresi. Ayni ceviriyi
+ * MERT tarafinda instruction buffer ve SYNC_BO icin de yapiyoruz.
+ *
+ * Pencere SINIRLI: aie2_pci.h'ye gore [AIE2_DEVM_BASE, +AIE2_DEVM_SIZE).
+ * Disindaki adresler oldugu gibi host adresi (IOVA) sayiliyor -- paylasimli
+ * BO'lar gercekten oyle adresleniyor.
+ */
+static bool shim_dma_addr(XdnaArray *arr, AieTile *t, uint64_t *addr,
+                          uint32_t len)
+{
+    uint64_t off;
+
+    if (*addr < AIE2_DEVM_BASE ||
+        *addr >= (uint64_t)AIE2_DEVM_BASE + AIE2_DEVM_SIZE ||
+        !arr->devm_heap_size) {
+        return true;
+    }
+    off = *addr - AIE2_DEVM_BASE;
+    if (off + len > arr->devm_heap_size) {
+        xdna_log(arr->npu, XDNA_LOG_ERROR,
+                 "DMA: shim(%u,%u) cihaz adresi heap disinda "
+                 "(offset 0x%llx + %u > 0x%llx)",
+                 t->col, t->row, (unsigned long long)off, len,
+                 (unsigned long long)arr->devm_heap_size);
+        return false;
+    }
+    *addr = arr->devm_heap_addr + off;
+    return true;
+}
+
 static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir,
                            uint32_t ch)
 {
@@ -841,6 +877,11 @@ static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir,
     uint32_t remaining = bd->len_words * 4u;
     uint64_t addr = bd->addr;
     uint8_t chunk[DMA_CHUNK];
+
+    if (t->kind == AIE_TILE_SHIM && !shim_dma_addr(arr, t, &addr, remaining)) {
+        xdna_async_error(npu, t->col, t->row, t->kind, XDNA_ERR_DMA);
+        return -1;
+    }
 
     while (remaining) {
         uint32_t n = remaining < DMA_CHUNK ? remaining : DMA_CHUNK;

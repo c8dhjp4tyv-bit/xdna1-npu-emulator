@@ -112,9 +112,12 @@ if (amdxdna_sva_init(client)) {
 
 PASID alinamazsa surucu uyarip devam ediyor -- **carveout bellek
 yapilandirilmissa**. `create_ctx_req.pasid` o durumda 0 gonderiliyor
-(`req.pasid = amdxdna_pasid_on(client) ? client->pasid : 0`). Elimizdeki
-kaynaklarda carveout'u npu1 yolu icin kuran bir cagri yok (aie4/SR-IOV
-tarafinda gorunuyor), dolayisiyla pratikte (a) daha gercekci.
+(`req.pasid = amdxdna_pasid_on(client) ? client->pasid : 0`).
+
+> **Sonradan duzeltme:** carveout'un npu1 yolunda kurulamayacagini
+> dusunmustuk. Yanlismis: `amdxdna_debugfs.c` carveout'u **debugfs'ten**
+> ayarlayan bir dosya sunuyor, aygittan bagimsiz. Asagidaki 5. bulguya
+> bakin -- `/dev/accel/accel0` bu yolla aciliyor.
 
 ### DENEY SONUCLARI (gercek guest, QEMU master + Linux master)
 
@@ -206,20 +209,56 @@ QEMU'yu **TCG ile** (yani `-accel kvm` olmadan) kosturunca kernel
 `X86_HYPER_NATIVE` goruyor ve kontrol geciyor. **KVM ile bu kontrol
 basarisiz olur** -- performansli bir kurulum icin bu ayri bir engel.
 
+**5. SVA gerekmiyormus: surucunun kendi carveout yolu var.**
+
+`amdxdna_drm_open`, PASID alinamadiginda **carveout** bellek
+yapilandirilmissa `open()`'i basarili sayiyor:
+
+```c
+if (amdxdna_sva_init(client)) {
+        XDNA_WARN(xdna, "PASID not available for pid %d", client->pid);
+        if (!amdxdna_use_carveout(xdna)) {
+                XDNA_ERR(xdna, "PASID unavailable and carveout not configured");
+                ret = -EINVAL;
+```
+
+Carveout, surucunun **kendi debugfs arayuzunden** ayarlanan fiziksel
+olarak surekli bir bellek blogu (`amdxdna_debugfs.c`):
+
+```
+/sys/kernel/debug/accel/<pci-adresi>/carveout  <-  "<boyut>@<adres>"
+```
+
+Guest tarafinda hicbir sey degistirilmiyor -- bu stock surucunun kendi
+ozelligi ("platform debug/bringup feature"). Tek gereken, o fiziksel
+bolgenin kernel tarafindan kullanilmiyor olmasi (`memmap=128M$0x...`)
+ve `CONFIG_DEBUG_FS=y`.
+
+Bununla `/dev/accel/accel0` aciliyor, BO'lar ayriliyor, context
+olusuyor ve **uctan uca workload kosuyor**.
+
+**6. QEMU'nun amd-iommu'su aygit DMA'sini CEVIRMIYOR.**
+
+Bu, uctan uca yolda ortaya cikti: BO'lar IOVA ile adresleniyor
+(orn. heap IOVA'si `0xbc000000`), 2 GB RAM'li bir guest'te bu adres
+RAM'in disinda. `-device amd-iommu` ile emulatorun DMA okumasi hep
+`0xff` donuyor; `-device intel-iommu,...` ile ceviri dogru yapiliyor ve
+her sey calisiyor. Bu yuzden `run.sh` varsayilani **intel** oldu.
+
 ### Sonuc
 
 Sirali plan guncellendi:
 
-1. **Bugun calisan yapilandirma:** `-device amd-iommu` + TCG. Probe
-   geciyor, `/dev/accel/accel0` olusuyor, telemetri ve surum sorgulari
-   calisiyor. Yalnizca `open()` yapilamiyor.
-2. **`open()` icin gereken:** vIOMMU tarafinda calisan SVA. Aygit tarafinda
-   yapilabilecek her sey yapildi (ATS/PRI/PASID bildiriliyor). Kalan is
-   QEMU/kernel tarafinda.
-3. **Alternatif:** surucuye carveout yapilandirmasi eklemek (npu1 yolunda
-   su an cagrilmiyor) veya SVA gerektirmeyen bir client yolu. Bu, upstream
-   surucuye katki gerektirir.
-4. **KVM istenirse** hipervizor tespiti ayrica ele alinmali.
+1. **Bugun calisan yapilandirma:** `-device intel-iommu,scalable-mode=on,...`
+   + TCG + carveout. Probe geciyor, `/dev/accel/accel0` **aciliyor**,
+   sorgular calisiyor ve **uctan uca workload dogru cikti uretiyor**.
+   `-device amd-iommu` ile probe geciyor ama DMA cevrilmedigi icin
+   workload calismiyor.
+2. **SVA'nin kendisi hala baglanmiyor.** Aygit tarafinda yapilabilecek her
+   sey yapildi (ATS/PRI/PASID bildiriliyor); kalan is QEMU/kernel
+   tarafinda. Carveout bunu gerektirmeyen bir yol acti, ama process
+   basina ayri PASID izolasyonu icin SVA yine de dogru cozum.
+3. **KVM istenirse** hipervizor tespiti ayrica ele alinmali.
 
 Kaynaklar:
 [QEMU VT-d ATS serisi](https://patchew.org/QEMU/20240521130946.117849-1-clement.mathieu--drif@eviden.com/),

@@ -76,7 +76,7 @@ okur/yazar.
 | 6. XDNA array modeli | tamam, stream switch dahil |
 | 7. AIE instruction interpreter | **cozme katmani tamam**; semantik yok |
 | 8. ctrlcode motoru | tamam, testli |
-| 9. Uctan uca workload | veri hareketi calisiyor; compute eksik |
+| 9. Uctan uca workload | **gercek guest'te veri yolu calisti**; compute eksik |
 | 10. Uyumluluk + performans | baslanmadi |
 
 Tam liste ve kabul kriterleri: [`docs/02-yol-haritasi.md`](docs/02-yol-haritasi.md).
@@ -98,6 +98,14 @@ QUERY_AIE_METADATA     = 5 sutun, sutun boyu 8192
 CREATE_BO(DEV_HEAP)    = handle 1, 67108864 bayt
 GET_BO_INFO            = xdna_addr 0x4000000, map_offset 0x100000000
 CREATE_HWCTX           = handle 1, syncobj 1
+--- uctan uca workload ---
+BO'lar                 = inst 0x4020000, in 0x4030000, out 0x4038000
+CONFIG_HWCTX(CU)       = tamam
+ctrlcode               = 720 bayt
+EXEC_CMD               = seq 0
+SYNCOBJ_TIMELINE_WAIT  = tamam (nokta 0)
+komut durumu           = 4 (COMPLETED)
+SONUC                  = cikis girisle BIREBIR AYNI (256 bayt)
 DESTROY_HWCTX          = tamam
 ```
 
@@ -105,19 +113,35 @@ Surucu aygiti buldu, SMU guc dizisini ve PSP firmware yuklemesini gecti,
 firmware el sikismasini tamamladi, mailbox uzerinden surum sorgularini
 yapti, `/dev/accel/accel0` olusturdu; guest **stock DRM UAPI'siyle**
 aygiti acti, bilgi sorgularini yapti, cihaz heap'i BO'su olusturup mmap
-etti ve donanim context'i olusturup yok etti.
+etti, donanim context'i olusturdu ve **gercek bir workload'i uctan uca
+kosturup dogru cikti aldi**:
+
+```
+guest userspace -> DRM EXEC_CMD (ERT_START_NPU) -> stock amdxdna
+  -> mailbox CHAIN_EXEC_DPU -> emulator MERT -> ctrlcode yorumlayicisi
+  -> XDNA array: shim MM2S -> memory tile (lock) -> shim S2MM
+  -> cikis BO'su
+```
+
+Guest tarafinda degistirilmis hicbir sey yok; emulator tarafinda da
+kisayol yok -- veri gercekten modellenmis DMA, lock ve stream switch
+uzerinden geciyor. Yurutulen ctrlcode, `tests/test_exec.c`'nin
+dogruladigi ureticinin (`tests/ctrlcode.h`) ta kendisi.
 
 `iommu_sva_bind_device()` QEMU vIOMMU'sunda hala baglanmiyor. Aygiti acmak
 icin **surucunun kendi carveout yolu** kullaniliyor: stock surucu, PASID
 alinamadiginda debugfs'ten ayarlanmis bir carveout bellek blogu varsa
 `open()`'i basarili sayiyor. Guest tarafinda hicbir sey degistirilmiyor.
-Kurulum, tekrar uretim ve tam analiz: [`qemu/guest-test/`](qemu/guest-test/)
-ve [`docs/03-acik-sorular.md`](docs/03-acik-sorular.md).
+Ayrica uctan uca yol icin QEMU'da `intel-iommu` gerekiyor; `amd-iommu`
+aygit DMA'sini cevirmiyor. Kurulum, tekrar uretim ve tam analiz:
+[`qemu/guest-test/`](qemu/guest-test/) ve
+[`docs/03-acik-sorular.md`](docs/03-acik-sorular.md).
 
-`EXEC_DPU` ve `CHAIN_EXEC_DPU` gercek ctrlcode'u yurutuyor: host bellegindin
-DMA ile okunuyor, XAie transaction'lari yorumlaniyor ve array uzerinde
-BD/lock/DMA islemleri gerceklesiyor. `tests/test_exec.c` bunu uctan uca
-dogruluyor (host -> memory tile -> host).
+`EXEC_DPU` ve `CHAIN_EXEC_DPU` gercek ctrlcode'u yurutuyor: tampon
+adresleri cihaz bellegi penceresinden context heap'ine cevriliyor, XAie
+transaction'lari yorumlaniyor ve array uzerinde BD/lock/DMA islemleri
+gerceklesiyor. `tests/test_exec.c` bunu uctan uca dogruluyor
+(host -> memory tile -> host), gercek guest de ayni yolu kosturuyor.
 
 Compute tile programlari **yurutulmuyor**: AIE2 instruction semantikleri
 (asama 7) henuz yok. Ama **cozme katmani tamam** ve `CORE_CONTROL` enable

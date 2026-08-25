@@ -183,6 +183,14 @@ typedef struct XdnaArray {
     XdnaNpu *npu;
     AieTile tile[AIE_NUM_COLS][AIE_NUM_ROWS];
     AieStats stats;
+    /*
+     * Yurutulmekte olan context'in cihaz bellegi penceresi. Shim DMA
+     * tanimlayicilarindaki adresler XRT tarafindan yamandiginda cihaz
+     * bellegi adresi tasiyor (AIE2_DEVM_BASE tabanli); onlari context'in
+     * host heap'ine cevirmek gerekiyor. Sifirsa ceviri yok.
+     */
+    uint64_t devm_heap_addr;
+    uint64_t devm_heap_size;
 } XdnaArray;
 
 XdnaArray *xdna_array_new(XdnaNpu *npu);

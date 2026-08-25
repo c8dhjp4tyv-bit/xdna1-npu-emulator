@@ -8,19 +8,22 @@ set -eu
 
 QEMU=${QEMU:-./qemu-system-x86_64}
 BZIMAGE=${BZIMAGE:-./bzImage}
-IOMMU=${IOMMU:-amd}
+IOMMU=${IOMMU:-intel}
 
 case "$IOMMU" in
-amd)
-    # Calisan yapilandirma: probe geciyor, /dev/accel/accel0 olusuyor.
-    # SVA yok (QEMU'nun amd-iommu'sunda PASID destegi yok).
-    IOMMU_DEV="-device amd-iommu"
-    CMDLINE="console=ttyS0 panic=1 memmap=64M\$0x60000000"
-    ;;
 intel)
-    # PASID destekli vIOMMU; SVA hala baglanmiyor (bkz. docs/03).
+    # VARSAYILAN. Uctan uca workload YALNIZCA burada calisiyor: QEMU'nun
+    # intel-iommu'su aygit DMA'sini gercekten ceviriyor, amd-iommu'su
+    # cevirmiyor (bkz. docs/03-acik-sorular.md). BO'lar IOVA ile
+    # adreslendigi icin ceviri sart. SVA yine de baglanmiyor.
     IOMMU_DEV="-device intel-iommu,scalable-mode=on,svm=on,fsts=on,pasid-bits=16,device-iotlb=on,intremap=on"
-    CMDLINE="console=ttyS0 panic=1 intel_iommu=on,sm_on memmap=64M\$0x60000000"
+    CMDLINE="console=ttyS0 panic=1 intel_iommu=on,sm_on memmap=128M\$0x60000000"
+    ;;
+amd)
+    # Probe ve sorgular geciyor, /dev/accel/accel0 olusuyor; ama aygit
+    # DMA'si cevrilmedigi icin workload yolu calismiyor.
+    IOMMU_DEV="-device amd-iommu"
+    CMDLINE="console=ttyS0 panic=1 memmap=128M\$0x60000000"
     ;;
 *)
     echo "IOMMU=amd|intel" >&2
