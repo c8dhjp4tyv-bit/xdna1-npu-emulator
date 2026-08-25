@@ -668,13 +668,54 @@ static void handle_chain_exec_dpu(XdnaNpu *npu, unsigned chan,
     mert_reply(npu, chan, hdr, &resp, sizeof(resp));
 }
 
+/*
+ * Cihaz adresi -> host adresi.
+ *
+ * amdxdna_gem.c: heap BO'nun cihaz adresi dev_mem_base'den basliyor
+ * (abo->dev_addr = dev_info->dev_mem_base + total_heap_size) ve devm
+ * penceresindeki offset `dev_addr - dev_mem_base` olarak hesaplaniyor.
+ * Heap'in host adresini firmware MAP_HOST_BUFFER ile ogreniyor.
+ *
+ * Yani cihaz bellegi ayri bir fiziksel bellek degil; context'in host
+ * heap tamponuna bakan bir adres penceresi.
+ */
+static bool devm_to_host(XdnaNpu *npu, const XdnaContext *ctx,
+                         uint64_t dev_addr, uint32_t size, uint64_t *host_addr)
+{
+    uint64_t off;
+
+    if (!ctx->heap_addr || !ctx->heap_size) {
+        xdna_log(npu, XDNA_LOG_ERROR,
+                 "MERT: context %u icin heap bildirilmemis", ctx->id);
+        return false;
+    }
+    if (dev_addr < AIE2_DEVM_BASE) {
+        xdna_log(npu, XDNA_LOG_ERROR,
+                 "MERT: 0x%llx cihaz bellegi penceresinin altinda",
+                 (unsigned long long)dev_addr);
+        return false;
+    }
+    off = dev_addr - AIE2_DEVM_BASE;
+    if (off + size > ctx->heap_size) {
+        xdna_log(npu, XDNA_LOG_ERROR,
+                 "MERT: cihaz adresi heap disinda (offset 0x%llx + %u > 0x%llx)",
+                 (unsigned long long)off, size,
+                 (unsigned long long)ctx->heap_size);
+        return false;
+    }
+    *host_addr = ctx->heap_addr + off;
+    return true;
+}
+
 static void handle_sync_bo(XdnaNpu *npu, unsigned chan,
                            const XdnaMsgHeader *hdr, const uint8_t *payload)
 {
     SyncBoReq req;
+    XdnaContext *ctx = ctx_by_chan(npu, chan);
     uint8_t chunk[4096];
     uint32_t done = 0;
     uint32_t src_type, dst_type;
+    uint64_t src = 0, dst = 0;
 
     if (hdr->total_size < sizeof(req)) {
         mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
@@ -682,19 +723,36 @@ static void handle_sync_bo(XdnaNpu *npu, unsigned chan,
     }
     memcpy(&req, payload, sizeof(req));
 
+    /* aie2_msg_priv.h: type alaninin alt/ust nibble'lari src/dst turu */
     src_type = req.type & 0xFu;
     dst_type = (req.type >> 4) & 0xFu;
 
-    /*
-     * SYNC_BO_HOST_MEM = 2, SYNC_BO_DEV_MEM = 0 (aie2_msg_priv.h).
-     * Cihaz bellegi (AIE2_DEVM) modeli henuz yok; host<->host kopyalama
-     * dogru sekilde yapiliyor, digerleri acikca reddediliyor.
-     */
-    if (src_type != SYNC_BO_HOST_MEM || dst_type != SYNC_BO_HOST_MEM) {
-        xdna_log(npu, XDNA_LOG_WARN,
-                 "MERT: SYNC_BO cihaz bellegi yolu uygulanmadi (type 0x%x)",
+    src = req.src_addr;
+    dst = req.dst_addr;
+
+    if (src_type == SYNC_BO_DEV_MEM || dst_type == SYNC_BO_DEV_MEM) {
+        if (!ctx) {
+            mert_reply_status(npu, chan, hdr,
+                              AIE2_STATUS_MGMT_ERT_INVALID_PARAM);
+            return;
+        }
+        if (src_type == SYNC_BO_DEV_MEM &&
+            !devm_to_host(npu, ctx, req.src_addr, req.size, &src)) {
+            mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+            return;
+        }
+        if (dst_type == SYNC_BO_DEV_MEM &&
+            !devm_to_host(npu, ctx, req.dst_addr, req.size, &dst)) {
+            mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
+            return;
+        }
+    }
+
+    if ((src_type != SYNC_BO_HOST_MEM && src_type != SYNC_BO_DEV_MEM) ||
+        (dst_type != SYNC_BO_HOST_MEM && dst_type != SYNC_BO_DEV_MEM)) {
+        xdna_log(npu, XDNA_LOG_WARN, "MERT: SYNC_BO bilinmeyen tur 0x%x",
                  req.type);
-        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_OPERATION);
+        mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_PARAM);
         return;
     }
 
@@ -705,8 +763,8 @@ static void handle_sync_bo(XdnaNpu *npu, unsigned chan,
             n = sizeof(chunk);
         }
         if (!npu->ops->dma_read || !npu->ops->dma_write ||
-            npu->ops->dma_read(npu->opaque, req.src_addr + done, chunk, n) != 0 ||
-            npu->ops->dma_write(npu->opaque, req.dst_addr + done, chunk, n) != 0) {
+            npu->ops->dma_read(npu->opaque, src + done, chunk, n) != 0 ||
+            npu->ops->dma_write(npu->opaque, dst + done, chunk, n) != 0) {
             mert_reply_status(npu, chan, hdr, AIE2_STATUS_INVALID_INPUT_BUFFER);
             return;
         }

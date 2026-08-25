@@ -248,6 +248,26 @@ arasinda lock durumunun sifirlanmasi, CHAIN_EXEC_DPU, SYNC_BO ve dort hata
 yolu (saglanmayan MASKPOLL, partition disi kolon, bozuk op boyutu, bilinmeyen
 opcode).
 
+## 9a. Cihaz bellegi (AIE2_DEVM)
+
+Cihaz bellegi ayri bir fiziksel bellek degil; context'in host heap
+tamponuna bakan bir **adres penceresi**:
+
+```
+cihaz adresi D  ->  host adresi = heap_addr + (D - AIE2_DEVM_BASE)
+```
+
+`AIE2_DEVM_BASE = 0x4000000`, pencere 64 MiB. Heap'in host adresini
+firmware `MAP_HOST_BUFFER` ile ogreniyor.
+
+Kaynak: `amdxdna_gem.c` -- heap BO'nun cihaz adresi `dev_mem_base`'den
+basliyor (`abo->dev_addr = dev_info->dev_mem_base + total_heap_size`) ve
+devm penceresindeki offset `dev_addr - dev_mem_base`.
+
+`SYNC_BO` bu ceviriyi yapiyor: `type` alaninin alt nibble'i kaynak, ust
+nibble'i hedef turu (`SYNC_BO_DEV_MEM = 0`, `SYNC_BO_HOST_MEM = 2`).
+Heap siniri disina tasan cihaz adresleri reddediliyor.
+
 ## 9b. Asenkron hata bildirimi
 
 Array'de bir hata olustugunda emulator bunu surucuye gercek protokolle
@@ -286,6 +306,7 @@ uyari loglaniyor.
 - **Overlay / PDI yuklemesi**: `CONFIG_CU` CU eslemesini kaydediyor ama PDI
   imajini array'e yuklemiyor.
 - **Custom op'lar**: TCT ve DDR_PATCH.
-- **Cihaz bellegi (AIE2_DEVM)**: `SYNC_BO` yalnizca host-host yolunu
-  destekliyor.
 - **Paket anahtarlamali stream** ve trace portlari.
+- **BD adreslerinde cihaz adresi cevirisi**: `SYNC_BO` cevriyor, ama shim
+  BD'lerine yazilan adresler ham kabul ediliyor (gercek ctrlcode bunlari
+  DDR_PATCH ile yamiyor).

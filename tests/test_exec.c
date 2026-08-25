@@ -551,6 +551,47 @@ static void test_exec(Host *host, XdnaNpu *npu)
         CHECK_EQ(status, 0, "core enable yazmasi kabul edilmeli");
     }
 
+    step("SYNC_BO: cihaz bellegi (AIE2_DEVM) <-> host");
+    {
+        SyncBoReq req;
+        MapBufReq map;
+        uint64_t heap = HOST_MEM_BASE + 0x500000;
+        uint32_t heap_size = 0x100000;
+        uint8_t *heap_p = host_ptr(host, heap);
+        uint8_t *dst = host_ptr(host, SYNC_DST_ADDR);
+        uint64_t dev_addr = AIE2_DEVM_BASE + 0x1000;
+
+        /* Context'in heap'ini bildir: cihaz adresleri buraya bakiyor. */
+        map.context_id = cctx.context_id;
+        map.buf_addr = heap;
+        map.buf_size = heap_size;
+        CHECK(mbox_send_recv(&ctxd, MSG_OP_MAP_HOST_BUFFER, &map, sizeof(map),
+                             &st, sizeof(st)) == 0, "heap bildir");
+        CHECK_EQ(st.status, 0, "heap bildirme durumu");
+
+        /* Heap icinde, cihaz adresinin denk geldigi yere desen yaz. */
+        for (i = 0; i < XFER_BYTES; i++) {
+            heap_p[0x1000 + i] = (uint8_t)(i ^ 0x5Au);
+        }
+        memset(dst, 0, XFER_BYTES);
+
+        req.src_addr = dev_addr;
+        req.dst_addr = SYNC_DST_ADDR;
+        req.size = XFER_BYTES;
+        req.type = (SYNC_BO_HOST_MEM_T << 4) | SYNC_BO_DEV_MEM_T;
+        CHECK(mbox_send_recv(&ctxd, MSG_OP_SYNC_BO, &req, sizeof(req), &st,
+                             sizeof(st)) == 0, "sync bo dev->host");
+        CHECK_EQ(st.status, 0, "sync bo dev->host durumu");
+        CHECK(memcmp(heap_p + 0x1000, dst, XFER_BYTES) == 0,
+              "cihaz adresi heap'e dogru cevrilmedi");
+
+        /* Heap sinirinin disi reddedilmeli. */
+        req.src_addr = AIE2_DEVM_BASE + heap_size;
+        CHECK(mbox_send_recv(&ctxd, MSG_OP_SYNC_BO, &req, sizeof(req), &st,
+                             sizeof(st)) == 0, "sinir disi sync bo cevabi");
+        CHECK(st.status != 0, "heap disi cihaz adresi reddedilmeli");
+    }
+
     step("Asenkron hata bildirimi");
     {
         AsyncEventReq areq;
