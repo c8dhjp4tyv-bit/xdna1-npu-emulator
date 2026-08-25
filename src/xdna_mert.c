@@ -146,11 +146,6 @@ typedef struct {
 } AsyncEventReq;
 
 typedef struct {
-    uint32_t status;
-    uint32_t type;
-} AsyncEventResp;
-
-typedef struct {
     uint64_t dump_buff_addr;
     uint32_t dump_buff_size;
     uint32_t num_cols;
@@ -883,6 +878,8 @@ void xdna_mert_handle(XdnaNpu *npu, unsigned chan, const XdnaMsgHeader *hdr,
         npu->async_buf_addr = req.buf_addr;
         npu->async_buf_size = req.buf_size;
         npu->async_registered = true;
+        npu->async_chan = chan;
+        npu->async_msg_id = hdr->id;
         /*
          * Gercek firmware bu mesaji HEMEN cevaplamaz: asenkron bir olay
          * olustugunda cevap olarak dondurur. Surucu de (aie2_error.c) bunu

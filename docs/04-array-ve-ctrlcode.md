@@ -248,6 +248,35 @@ arasinda lock durumunun sifirlanmasi, CHAIN_EXEC_DPU, SYNC_BO ve dort hata
 yolu (saglanmayan MASKPOLL, partition disi kolon, bozuk op boyutu, bilinmeyen
 opcode).
 
+## 9b. Asenkron hata bildirimi
+
+Array'de bir hata olustugunda emulator bunu surucuye gercek protokolle
+bildiriyor (`src/xdna_error.c`):
+
+```
+surucu: REGISTER_ASYNC_EVENT_MSG (tampon adresi)   -> CEVAP YOK, bekletilir
+   ...
+array : DMA / lock / stream hatasi
+firmware: tampona aie_err_info + aie_error yaz
+firmware: bekleyen mesaja cevap don (status, type = AIE_ERROR)
+surucu: hatayi siniflandir, olayi YENIDEN kaydet
+```
+
+Olay kimlikleri `aie2_error.c` LUT'larindan alindi; uydurma bir `event_id`
+surucu tarafinda "unknown" olarak siniflanirdi:
+
+| Tile | DMA | LOCK | STREAM | mod_type |
+| --- | --- | --- | --- | --- |
+| shim | 72 | 74 | 65 | `AIE_PL_MOD` (2) |
+| memory (satir 1) | 133 | 139 | 135 | `AIE_MEM_MOD` (0) |
+| compute | 97 | 101 | 56 | `AIE_MEM_MOD` / stream icin `AIE_CORE_MOD` |
+
+Surucu `AIE_MEM_MOD` icin LUT'u satira gore seciyor (`row == 1` -> memory
+tile), bu da topolojimizle birebir ortusuyor.
+
+Hata kaydedilmemisse (surucu henuz olay kaydetmemis) sessizce yutulmuyor,
+uyari loglaniyor.
+
 ## 10. Bu katmanda hala eksik olan
 
 - **AIE instruction interpreter** (asama 7). `CORE_CONTROL` yazmasi kabul
@@ -259,3 +288,4 @@ opcode).
 - **Custom op'lar**: TCT ve DDR_PATCH.
 - **Cihaz bellegi (AIE2_DEVM)**: `SYNC_BO` yalnizca host-host yolunu
   destekliyor.
+- **Paket anahtarlamali stream** ve trace portlari.

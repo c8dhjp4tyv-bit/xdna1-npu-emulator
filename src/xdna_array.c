@@ -655,6 +655,7 @@ static void ss_inject(XdnaArray *arr, int col, int row, int slave_port,
                  "stream: tile(%u,%u) slave port %d etkin degil", t->col,
                  t->row, slave_port);
         arr->stats.stream_drops++;
+        xdna_async_error(arr->npu, t->col, t->row, t->kind, XDNA_ERR_STREAM);
         return;
     }
 
@@ -679,6 +680,7 @@ static void ss_inject(XdnaArray *arr, int col, int row, int slave_port,
                  "stream: tile(%u,%u) slave port %d icin master yok", t->col,
                  t->row, slave_port);
         arr->stats.stream_drops++;
+        xdna_async_error(arr->npu, t->col, t->row, t->kind, XDNA_ERR_STREAM);
     }
 }
 
@@ -848,6 +850,8 @@ static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir,
                     xdna_log(npu, XDNA_LOG_ERROR,
                              "DMA: host okuma hatasi 0x%llx",
                              (unsigned long long)addr);
+                    xdna_async_error(npu, t->col, t->row, t->kind,
+                                     XDNA_ERR_DMA);
                     return -1;
                 }
             } else {
@@ -855,6 +859,8 @@ static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir,
                     xdna_log(npu, XDNA_LOG_ERROR,
                              "DMA: tile(%u,%u) bellek disi okuma 0x%llx+%u",
                              t->col, t->row, (unsigned long long)addr, n);
+                    xdna_async_error(npu, t->col, t->row, t->kind,
+                                     XDNA_ERR_DMA);
                     return -1;
                 }
                 memcpy(chunk, t->data + addr, n);
@@ -866,6 +872,7 @@ static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir,
                 xdna_log(npu, XDNA_LOG_ERROR,
                          "DMA: tile(%u,%u) kanal %u giris FIFO'su bos",
                          t->col, t->row, ch);
+                xdna_async_error(npu, t->col, t->row, t->kind, XDNA_ERR_DMA);
                 return -1;
             }
             if (t->kind == AIE_TILE_SHIM) {
@@ -874,6 +881,8 @@ static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir,
                     xdna_log(npu, XDNA_LOG_ERROR,
                              "DMA: host yazma hatasi 0x%llx",
                              (unsigned long long)addr);
+                    xdna_async_error(npu, t->col, t->row, t->kind,
+                                     XDNA_ERR_DMA);
                     return -1;
                 }
             } else {
@@ -881,6 +890,8 @@ static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir,
                     xdna_log(npu, XDNA_LOG_ERROR,
                              "DMA: tile(%u,%u) bellek disi yazma 0x%llx+%u",
                              t->col, t->row, (unsigned long long)addr, n);
+                    xdna_async_error(npu, t->col, t->row, t->kind,
+                                     XDNA_ERR_DMA);
                     return -1;
                 }
                 memcpy(t->data + addr, chunk, n);
@@ -931,6 +942,7 @@ static void dma_run_channel(XdnaArray *arr, AieTile *t, int dir, uint32_t ch)
                 xdna_log(npu, XDNA_LOG_WARN,
                          "DMA: tile(%u,%u) BD %u lock %u alinamadi (deger %d)",
                          t->col, t->row, cur, bd.acq_id, t->lock[bd.acq_id]);
+                xdna_async_error(npu, t->col, t->row, t->kind, XDNA_ERR_LOCK);
                 return;
             }
             if (dma_transfer_bd(arr, t, &bd, dir, ch) != 0) {

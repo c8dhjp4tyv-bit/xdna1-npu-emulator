@@ -188,7 +188,7 @@ typedef struct {
     uint32_t opcode;
 } MsgHeader;
 
-static int mbox_recv(Drv *d, uint32_t want_id, void *resp, uint32_t resp_size)
+int mbox_recv_pending(Drv *d, uint32_t want_id, void *resp, uint32_t resp_size)
 {
     MsgHeader hdr;
     uint32_t tail, head, peek, msg_size;
@@ -245,8 +245,9 @@ static int mbox_recv(Drv *d, uint32_t want_id, void *resp, uint32_t resp_size)
     return 0;
 }
 
-int mbox_send_recv(Drv *d, uint32_t opcode, const void *req, uint32_t req_size,
-                   void *resp, uint32_t resp_size)
+/* Ortak gonderme yolu; cevap beklemez. */
+static uint32_t mbox_post(Drv *d, uint32_t opcode, const void *req,
+                          uint32_t req_size)
 {
     MsgHeader hdr;
     uint32_t head, tail, usable, pkg_size, id;
@@ -265,7 +266,7 @@ int mbox_send_recv(Drv *d, uint32_t opcode, const void *req, uint32_t req_size,
     if (tail < head && tail + pkg_size >= head) {
         printf("  [BASARISIZ] x2i ring dolu\n");
         g_failures++;
-        return -1;
+        return 0;
     }
 
     id = (d->next_id++ & 0xFF) | XDNA_MBOX_MAGIC_VAL;
@@ -286,11 +287,28 @@ int mbox_send_recv(Drv *d, uint32_t opcode, const void *req, uint32_t req_size,
     d->x2i_tail = tail + pkg_size;
     d->host->irq_pending[d->msix_id] = false;
     wr32(d, XDNA_BAR_MBOX, d->x2i.tail_reg, d->x2i_tail);
+    return id;
+}
+
+uint32_t mbox_send_only(Drv *d, uint32_t opcode, const void *req,
+                        uint32_t req_size)
+{
+    return mbox_post(d, opcode, req, req_size);
+}
+
+int mbox_send_recv(Drv *d, uint32_t opcode, const void *req, uint32_t req_size,
+                   void *resp, uint32_t resp_size)
+{
+    uint32_t id = mbox_post(d, opcode, req, req_size);
+
+    if (!id) {
+        return -1;
+    }
 
     CHECK(d->host->irq_pending[d->msix_id],
           "opcode 0x%x icin MSI-X %u tetiklenmedi", opcode, d->msix_id);
 
-    return mbox_recv(d, id, resp, resp_size);
+    return mbox_recv_pending(d, id, resp, resp_size);
 }
 
 /* ---------------------------------------------------------------- */

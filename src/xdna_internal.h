@@ -191,6 +191,16 @@ void xdna_array_write32(XdnaArray *arr, uint8_t col, uint8_t row, uint32_t off,
 void xdna_array_block_write(XdnaArray *arr, uint8_t col, uint8_t row,
                             uint32_t off, const uint32_t *data, uint32_t words);
 
+/* Asenkron hata bildirimi (src/xdna_error.c) */
+typedef enum {
+    XDNA_ERR_DMA = 0,
+    XDNA_ERR_LOCK,
+    XDNA_ERR_STREAM,
+} XdnaErrCat;
+
+void xdna_async_error(XdnaNpu *npu, uint8_t col, uint8_t row, AieTileKind kind,
+                      XdnaErrCat cat);
+
 /* ctrlcode yurutucu (src/xdna_txn.c) */
 int xdna_txn_execute(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
                      uint32_t size);
@@ -244,6 +254,8 @@ struct XdnaNpu {
     uint64_t async_buf_addr;
     uint32_t async_buf_size;
     bool async_registered;
+    unsigned async_chan;    /* bekleyen mesajin kanali */
+    uint32_t async_msg_id;  /* bekleyen mesajin id'si  */
 
     XdnaStats stats;
 };
@@ -260,6 +272,14 @@ void xdna_smu_kick(XdnaNpu *npu);
 /* Firmware boot: SRAM'e mgmt kanal bilgisini yazip FW_ALIVE'i kaldirir. */
 void xdna_fw_boot(XdnaNpu *npu);
 void xdna_fw_shutdown(XdnaNpu *npu);
+
+/* MERT cevap yapilari (paylasilan) */
+#pragma pack(push, 1)
+typedef struct {
+    uint32_t status;
+    uint32_t type;
+} AsyncEventResp;
+#pragma pack(pop)
 
 /* Mailbox */
 void xdna_mbox_reset(XdnaNpu *npu);

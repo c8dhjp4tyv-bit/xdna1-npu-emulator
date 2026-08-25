@@ -36,6 +36,22 @@
 #define CHAIN_ADDR    (HOST_MEM_BASE + 0x420000)
 #define SYNC_SRC_ADDR (HOST_MEM_BASE + 0x430000)
 #define SYNC_DST_ADDR (HOST_MEM_BASE + 0x440000)
+#define ASYNC_BUF_ADDR (HOST_MEM_BASE + 0x450000)
+#define ASYNC_BUF_SIZE 0x2000u
+
+/* aie2_error.c: struct aie_error / struct aie_err_info -- packed DEGIL */
+typedef struct {
+    uint8_t row, col;
+    uint32_t mod_type;
+    uint8_t event_id;
+} AieErrorEntry;
+
+typedef struct {
+    uint32_t err_cnt, ret_code, rsvd;
+} AieErrInfoHdr;
+
+typedef struct { uint64_t buf_addr; uint32_t buf_size; } AsyncEventReq;
+typedef struct { uint32_t status, type; } AsyncEventResp;
 
 #define XFER_WORDS 64u
 #define XFER_BYTES (XFER_WORDS * 4u)
@@ -533,6 +549,64 @@ static void test_exec(Host *host, XdnaNpu *npu)
          */
         status = (uint32_t)exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x50000, size6);
         CHECK_EQ(status, 0, "core enable yazmasi kabul edilmeli");
+    }
+
+    step("Asenkron hata bildirimi");
+    {
+        AsyncEventReq areq;
+        AsyncEventResp aresp;
+        AieErrInfoHdr info;
+        AieErrorEntry entry;
+        uint8_t *abuf = host_ptr(host, ASYNC_BUF_ADDR);
+        uint8_t *cc7 = host_ptr(host, CTRLCODE_ADDR + 0x60000);
+        uint32_t async_id, size7;
+        TxnBuild b;
+
+        memset(abuf, 0, ASYNC_BUF_SIZE);
+
+        /* Surucu olay tamponunu kaydeder; firmware HEMEN cevaplamaz. */
+        areq.buf_addr = ASYNC_BUF_ADDR;
+        areq.buf_size = ASYNC_BUF_SIZE;
+        mgmt.host->irq_pending[mgmt.msix_id] = false;
+        async_id = mbox_send_only(&mgmt, MSG_OP_REGISTER_ASYNC_EVENT_MSG,
+                                  &areq, sizeof(areq));
+        CHECK(async_id != 0, "async event kaydi gonderildi");
+        CHECK(!mgmt.host->irq_pending[mgmt.msix_id],
+              "async kaydi hemen cevaplanmamali");
+
+        /*
+         * Host bellegi disina isaret eden bir shim BD ile DMA hatasi
+         * tetikle. Emulator bunu shim tile (satir 0) uzerinde bir DMA
+         * hatasi olarak bildirmeli.
+         */
+        txn_init(&b, cc7);
+        txn_config_stream_switch(&b);
+        txn_w32(&b, 0, 0, shim_bd(3, AIE_SHIM_BD_LEN_WORD), XFER_WORDS);
+        txn_w32(&b, 0, 0, shim_bd(3, AIE_SHIM_BD_ADDRLO_WORD), 0x0BAD0000u);
+        txn_w32(&b, 0, 0, shim_bd(3, AIE_SHIM_BD_ADDRHI_WORD), 0xFFFFu);
+        txn_w32(&b, 0, 0, shim_bd(3, AIE_SHIM_BD_CTRL_WORD),
+                1u << AIE_SHIM_BD_VALID_LSB);
+        txn_w32(&b, 0, 0, AIEML_SHIM_DMA_MM2S0_CTRL + AIEML_DMA_QUEUE_OFF, 3);
+        size7 = txn_finish(&b);
+
+        mgmt.host->irq_pending[mgmt.msix_id] = false;
+        (void)exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x60000, size7);
+
+        CHECK(mgmt.host->irq_pending[mgmt.msix_id],
+              "async hata icin mgmt MSI-X tetiklenmeli");
+        CHECK(mbox_recv_pending(&mgmt, async_id, &aresp, sizeof(aresp)) == 0,
+              "async hata cevabi alinamadi");
+        CHECK_EQ(aresp.status, 0, "async cevap durumu");
+        CHECK_EQ(aresp.type, 0, "async olay tipi (AIE_ERROR)");
+
+        memcpy(&info, abuf, sizeof(info));
+        memcpy(&entry, abuf + sizeof(info), sizeof(entry));
+        CHECK_EQ(info.err_cnt, 1, "hata sayisi");
+        CHECK_EQ(entry.col, 0, "hatali kolon");
+        CHECK_EQ(entry.row, 0, "hatali satir (shim)");
+        /* aie2_error.c: AIE_PL_MOD = 2, shim DMA olayi = 72 */
+        CHECK_EQ(entry.mod_type, 2, "modul tipi AIE_PL_MOD");
+        CHECK_EQ(entry.event_id, 72, "shim DMA olay kimligi");
     }
 
     step("Context yok et");

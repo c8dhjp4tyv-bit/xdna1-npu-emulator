@@ -84,6 +84,7 @@ typedef struct XdnaStats {
     uint64_t exec_cmds;
     uint64_t dma_bytes;
     uint64_t txn_ops;
+    uint64_t array_errors;
     uint32_t active_contexts;
     int fw_alive;
     int power_on;

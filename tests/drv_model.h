@@ -107,6 +107,17 @@ int smu_exec(Drv *d, uint32_t cmd, uint32_t arg, uint32_t *out);
 int mbox_send_recv(Drv *d, uint32_t opcode, const void *req, uint32_t req_size,
                    void *resp, uint32_t resp_size);
 
+/*
+ * Cevap beklemeden gonder; mesaj id'sini dondurur. Firmware'in hemen
+ * cevaplamadigi mesajlar icin (REGISTER_ASYNC_EVENT_MSG).
+ */
+uint32_t mbox_send_only(Drv *d, uint32_t opcode, const void *req,
+                        uint32_t req_size);
+
+/* Bekleyen bir cevabi tuket. */
+int mbox_recv_pending(Drv *d, uint32_t want_id, void *resp,
+                      uint32_t resp_size);
+
 int drv_get_mgmt_chann_info(Drv *d);
 /* SMU guc dizisi + PSP firmware yukleme + yonetim kanali kurulumu. */
 int drv_hw_start(Drv *d);
