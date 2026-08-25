@@ -153,6 +153,34 @@ static void txn_blockwrite(TxnBuild *b, uint8_t col, uint8_t row, uint32_t off,
     b->ops++;
 }
 
+/* Sabit boyutlu op'lar: yalnizca opcode + dolgu, Size alani YOK. */
+static void txn_fixed_op(TxnBuild *b, uint8_t opcode, uint32_t total_size)
+{
+    memset(b->buf + b->pos, 0, total_size);
+    b->buf[b->pos] = opcode;
+    b->pos += total_size;
+    b->ops++;
+}
+
+/* TCT custom op: CustomOpHdr + {word, config} */
+static void txn_tct(TxnBuild *b, uint8_t col, uint8_t row, uint8_t chan,
+                    bool mm2s)
+{
+    struct { OpHdr hdr; uint32_t Size; } c;
+    uint32_t payload[2];
+
+    memset(&c, 0, sizeof(c));
+    c.hdr.Op = XAIE_IO_CUSTOM_OP_TCT;
+    c.Size = (uint32_t)sizeof(c) + (uint32_t)sizeof(payload);
+    payload[0] = ((uint32_t)col << 16) | ((uint32_t)row << 8) |
+                 (mm2s ? 1u : 0u);
+    payload[1] = (uint32_t)chan << 24;
+    memcpy(b->buf + b->pos, &c, sizeof(c));
+    memcpy(b->buf + b->pos + sizeof(c), payload, sizeof(payload));
+    b->pos += c.Size;
+    b->ops++;
+}
+
 static uint32_t txn_finish(TxnBuild *b)
 {
     TxnHeader h;
@@ -510,6 +538,78 @@ static void test_exec(Host *host, XdnaNpu *npu)
 
         CHECK(exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x30000, size4) != 0,
               "partition disi erisim reddedilmeli");
+    }
+
+    step("Sabit boyutlu op'lar dogru atlanmali (NOOP) ve TCT islenmeli");
+    {
+        uint8_t *cc8 = host_ptr(host, CTRLCODE_ADDR + 0x70000);
+        TxnBuild b;
+        uint32_t size8;
+        uint32_t probe = 0xFEEDFACEu;
+
+        /*
+         * NOOP'un boyutu 4 bayt ve Size alani YOK. Custom op sanip Size
+         * okusaydik coplu bir deger alir, sonraki WRITE'i kacirirdik.
+         * Bu yuzden NOOP'tan SONRA bir WRITE koyup etkisini dogruluyoruz.
+         */
+        txn_init(&b, cc8);
+        txn_fixed_op(&b, XAIE_IO_NOOP, 4);
+        txn_w32(&b, 0, 1, MEMT_WORD_OFF * 4u, probe);
+        txn_fixed_op(&b, XAIE_IO_NOOP, 4);
+        txn_tct(&b, 0, 1, 0, true);
+        /* TCT sonrasi ikinci bir yazma: TCT boyutu da dogru islenmeli */
+        txn_w32(&b, 0, 1, MEMT_WORD_OFF * 4u + 4u, probe + 1u);
+        size8 = txn_finish(&b);
+
+        CHECK_EQ(exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x70000, size8), 0,
+                 "NOOP + TCT ctrlcode durumu");
+
+        /* Yazilanlari memory tile'dan DMA ile geri oku. */
+        {
+            uint8_t *cc9 = host_ptr(host, CTRLCODE_ADDR + 0x80000);
+            uint32_t got[2];
+            uint32_t size9;
+
+            txn_init(&b, cc9);
+            txn_config_stream_switch(&b);
+            txn_w32(&b, 0, 1, memt_bd(4, AIE_MEMT_BD_LEN_WORD), 2);
+            txn_w32(&b, 0, 1, memt_bd(4, AIE_MEMT_BD_ADDR_WORD), MEMT_WORD_OFF);
+            txn_w32(&b, 0, 1, memt_bd(4, AIE_MEMT_BD_CTRL_WORD),
+                    1u << AIE_MEMT_BD_VALID_LSB);
+            txn_w32(&b, 0, 1,
+                    AIEML_MEMT_DMA_MM2S0_CTRL + AIEML_DMA_QUEUE_OFF, 4);
+            txn_w32(&b, 0, 0, shim_bd(5, AIE_SHIM_BD_LEN_WORD), 2);
+            txn_w32(&b, 0, 0, shim_bd(5, AIE_SHIM_BD_ADDRLO_WORD),
+                    (uint32_t)OUTPUT_ADDR & AIE_SHIM_BD_ADDRLO_MASK);
+            txn_w32(&b, 0, 0, shim_bd(5, AIE_SHIM_BD_ADDRHI_WORD),
+                    (uint32_t)(OUTPUT_ADDR >> 32) & AIE_SHIM_BD_ADDRHI_MASK);
+            txn_w32(&b, 0, 0, shim_bd(5, AIE_SHIM_BD_CTRL_WORD),
+                    1u << AIE_SHIM_BD_VALID_LSB);
+            txn_w32(&b, 0, 0,
+                    AIEML_SHIM_DMA_S2MM0_CTRL + AIEML_DMA_QUEUE_OFF, 5);
+            size9 = txn_finish(&b);
+
+            memset(out, 0, 8);
+            CHECK_EQ(exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x80000, size9), 0,
+                     "geri okuma ctrlcode durumu");
+            memcpy(got, out, sizeof(got));
+            CHECK_EQ(got[0], probe, "NOOP sonrasi WRITE islendi");
+            CHECK_EQ(got[1], probe + 1u, "TCT sonrasi WRITE islendi");
+        }
+    }
+
+    step("Hata yolu: bilinmeyen opcode");
+    {
+        uint8_t *cc10 = host_ptr(host, CTRLCODE_ADDR + 0x90000);
+        TxnBuild b;
+
+        txn_init(&b, cc10);
+        /* 99 tanimli degil: boyutu bilinemez, hata donmeli. */
+        txn_fixed_op(&b, 99, 4);
+        txn_finish(&b);
+
+        CHECK(exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x90000, b.pos) != 0,
+              "bilinmeyen opcode reddedilmeli");
     }
 
     step("Hata yolu: bozuk ctrlcode boyutu");

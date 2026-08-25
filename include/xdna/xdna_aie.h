@@ -264,17 +264,45 @@
 /* ------------------------------------------------------------------ */
 /* Transaction (ctrlcode) formati -- xaie_txn.h + xaiegbl.h             */
 /* ------------------------------------------------------------------ */
+/*
+ * Guncel opcode listesi -- Xilinx/aiebu icindeki xaie_txn.h.
+ * DIKKAT: aie-rt'nin main-aie dali daha ESKI ve KISA bir liste tasiyor;
+ * gercek ctrlcode aiebu'daki listeyi kullaniyor. Sadece eski listeye
+ * bakmak, aradaki opcode'lari yanlis cozmeye yol acar.
+ */
 enum XdnaTxnOpcode {
-    XAIE_IO_WRITE                = 0,
-    XAIE_IO_BLOCKWRITE           = 1,
-    XAIE_IO_BLOCKSET             = 2,
-    XAIE_IO_MASKWRITE            = 3,
-    XAIE_IO_MASKPOLL             = 4,
-    XAIE_CONFIG_SHIMDMA_BD       = 5,
-    XAIE_CONFIG_SHIMDMA_DMABUF_BD = 6,
-    XAIE_IO_CUSTOM_OP_BEGIN      = 128,
-    XAIE_IO_CUSTOM_OP_TCT        = 128,
-    XAIE_IO_CUSTOM_OP_DDR_PATCH  = 129,
+    XAIE_IO_WRITE                 = 0,
+    XAIE_IO_BLOCKWRITE            = 1,
+    XAIE_IO_BLOCKSET              = 2,
+    XAIE_IO_MASKWRITE             = 3,
+    XAIE_IO_MASKPOLL              = 4,
+    XAIE_IO_NOOP                  = 5,
+    XAIE_IO_PREEMPT               = 6,
+    XAIE_IO_MASKPOLL_BUSY         = 7,
+    XAIE_IO_LOADPDI               = 8,
+    XAIE_IO_LOAD_PM_START         = 9,
+    XAIE_IO_CREATE_SCRATCHPAD     = 10,
+    XAIE_IO_UPDATE_STATE_TABLE    = 11,
+    XAIE_IO_UPDATE_REG            = 12,
+    XAIE_IO_UPDATE_SCRATCH        = 13,
+    XAIE_CONFIG_SHIMDMA_BD        = 14,
+    XAIE_CONFIG_SHIMDMA_DMABUF_BD = 15,
+    XAIE_IO_CUSTOM_OP_BEGIN       = 128,
+    XAIE_IO_CUSTOM_OP_TCT         = 128,
+    XAIE_IO_CUSTOM_OP_DDR_PATCH   = 129,
+    XAIE_IO_CUSTOM_OP_READ_REGS   = 130,
+    XAIE_IO_CUSTOM_OP_RECORD_TIMER = 131,
+    XAIE_IO_CUSTOM_OP_MERGE_SYNC  = 132,
 };
+
+/*
+ * Sabit boyutlu op basliklari (Size alani TASIMAZLAR).
+ * Bunlari custom op sanip Size okumak coplu bir boyut verir ve
+ * ctrlcode'un geri kalanini yanlis cozer.
+ */
+#define AIE_TXN_NOOP_SIZE     4u   /* XAie_NoOpHdr     */
+#define AIE_TXN_PREEMPT_SIZE  4u   /* XAie_PreemptHdr  */
+#define AIE_TXN_LOADPDI_SIZE  16u  /* XAie_LoadPdiHdr  */
+#define AIE_TXN_PMLOAD_SIZE   8u   /* XAie_PmLoadHdr   */
 
 #endif /* XDNA_AIE_H */

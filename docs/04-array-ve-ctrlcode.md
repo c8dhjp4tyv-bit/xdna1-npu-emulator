@@ -184,6 +184,29 @@ Boyutlar `static_assert` ile kilitli:
 | `XAie_BlockWrite32Hdr` | 16 |
 | `XAie_CustomOpHdr` | 8 |
 
+### Opcode listesi -- eski kaynak yaniltici
+
+`aie-rt`'nin `main-aie` dali **eski ve kisa** bir opcode listesi tasiyor.
+Gercek ctrlcode, `Xilinx/aiebu` icindeki guncel listeyi kullaniyor:
+aradaki `NOOP`, `PREEMPT`, `MASKPOLL_BUSY`, `LOADPDI`, `LOAD_PM_START`
+opcode'lari eski listede yok. Sadece eski listeye bakmak, opcode
+numaralarini kaydiriyor.
+
+### Op boyutu: iki farkli kural
+
+Bu, yorumlayicida gizli bir hataydi ve capraz kontrolle yakalandi:
+
+| Op | Boyut kaynagi |
+| --- | --- |
+| `WRITE`, `BLOCKWRITE`, `MASKWRITE`, `MASKPOLL`, `MASKPOLL_BUSY` | baslikta `Size` alani |
+| custom op'lar (`TCT`, `DDR_PATCH`, ...) | `XAie_CustomOpHdr.Size` |
+| `NOOP` (4), `PREEMPT` (4), `LOADPDI` (16), `LOAD_PM_START` (8) | **SABIT**, `Size` alani YOK |
+
+Sabit boyutlu bir op'u custom op sanip `Size` okumak coplu bir deger verir
+ve ctrlcode'un geri kalanini yanlis cozer. Bu yuzden **tanimadigimiz bir
+opcode'da artik hata donduruyoruz** -- boyutunu bilemedigimiz icin devam
+etmek guvenli degil.
+
 ### Uygulanan opcode'lar
 
 | Opcode | Durum |
@@ -191,16 +214,50 @@ Boyutlar `static_assert` ile kilitli:
 | `XAIE_IO_WRITE` | uygulandi |
 | `XAIE_IO_MASKWRITE` | uygulandi |
 | `XAIE_IO_MASKPOLL` | uygulandi (ust sinirli; sinira dayanmak hata) |
+| `XAIE_IO_MASKPOLL_BUSY` | MASKPOLL gibi islenıyor (varyant semantigi dogrulanmadi) |
 | `XAIE_IO_BLOCKWRITE` | uygulandi |
 | `XAIE_IO_BLOCKSET` | uygulandi (serilestirmede BLOCKWRITE'a donusuyor) |
-| `XAIE_IO_CUSTOM_OP_TCT` | **atlaniyor**, uyari veriliyor |
-| `XAIE_IO_CUSTOM_OP_DDR_PATCH` | **atlaniyor**, uyari veriliyor |
-| `XAIE_CONFIG_SHIMDMA_BD` / `_DMABUF_BD` | **atlaniyor**, uyari veriliyor |
+| `XAIE_IO_NOOP` | uygulandi (dogru boyutla atlaniyor) |
+| `XAIE_IO_CUSTOM_OP_TCT` | **uygulandi** -- asagiya bakin |
+| `XAIE_IO_CUSTOM_OP_DDR_PATCH` | taniniyor, **uygulanmiyor** |
+| `PREEMPT`, `LOADPDI`, `LOAD_PM_START`, `READ_REGS`, `RECORD_TIMER`, `MERGE_SYNC`, `SHIMDMA_BD` | taniniyor, **uygulanmiyor** |
+| bilinmeyen opcode | **hata** (boyut bilinemez) |
 
-Custom op'larin payload yerlesimi `aie-rt` icinde tanimli degil (XRT
-tarafinda); dogrulanmadan uygulanmalari yanlis sonuc uretir. Atlanan her op
-loglaniyor ve kosum sonunda "sonuc eksik olabilir" uyarisi veriliyor --
-sessiz basarisizlik yok.
+### TCT (Task Completion Token)
+
+Payload (`aiebu` `aie2p_passes.cpp`):
+
+```
+word:   bayt2 = kolon, bayt1 = satir, bayt0 = yon (1 = MM2S, 0 = S2MM)
+config: bayt3 = kanal, bayt2 = kolon sayisi, bayt1 = satir sayisi
+```
+
+Bir DMA kanalinin gorevini tamamlamasini bekler. Emulatorde DMA'lar
+**senkron** tamamlandigi icin token zaten hazir; yapilan is kanalin
+gecerliligini dogrulamak. Bu bir tahmin degil, modelimizin dogrudan
+sonucu -- DMA asenkron hale getirilirse burasi gercek beklemeye donusur.
+
+### DDR_PATCH neden uygulanmiyor
+
+Payload yerlesimi **dogrulandi** (`aiebu` `xaie_txn.h`, `patch_op_t`):
+
+```c
+typedef struct {
+    u32 action;
+    u64 regaddr; // yamanacak register adresi
+    u64 argidx;  // deger alinacak kernel arg indeksi
+    u64 argplus; // argidx'teki degere eklenecek offset
+} patch_op_t;   // 32 bayt
+```
+
+Anlam da acik: `regaddr`'a `arg[argidx] + argplus` yazilir. Uygulanmamasinin
+sebebi, **argumanlarin komut icindeki yerlesiminin** dogrulanmamis olmasi
+(kelime indeksi mi, 64-bit adresin iki kelimeye bolunmesi nasil). Yanlis
+yamalama sessizce yanlis sonuc uretirdi; bu yuzden op taniniyor, boyutu
+dogru atlaniyor ve uyari veriliyor.
+
+Atlanan her op loglaniyor ve kosum sonunda "sonuc eksik olabilir" uyarisi
+veriliyor -- sessiz basarisizlik yok.
 
 ### Partition siniri
 
