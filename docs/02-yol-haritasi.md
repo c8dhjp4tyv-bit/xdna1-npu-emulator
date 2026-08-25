@@ -33,9 +33,10 @@ class Class 1200, addr 00:01.0, pci id 1022:1502
 bar 0: mem [0x7fffe]   bar 2: mem [0x3fffe]   bar 4: mem [0xfffe]
 ```
 
-PCI kimligi, sinif kodu ve uc 64-bit BAR tasarlandigi gibi. Guest icinde
-`lspci`/`modprobe amdxdna` ile dogrulama henuz yapilmadi -- bunun icin
-`CONFIG_DRM_ACCEL_AMDXDNA` etkin bir kernel gerekiyor.
+PCI kimligi, sinif kodu ve uc 64-bit BAR tasarlandigi gibi. Gercek bir
+guest'te de dogrulandi (asama 2): kernel aygiti
+`pci 0000:00:03.0: [1022:1502] type 00 class 0x120000` olarak buluyor ve
+`amdxdna` surucusu bagliyor.
 
 ## 2. Surucu boot'u
 
@@ -113,8 +114,13 @@ tamponu), host bellegine DMA, memory tile'lar.
 okunur; `SYNC_BO` her iki yonde dogru calisir.
 
 **Durum:** shim DMA host bellegini gercekten okuyup yaziyor; memory ve
-compute tile bellekleri modellendi; `SYNC_BO` host-host yolunda calisiyor.
-Cihaz bellegi (AIE2_DEVM) yolu ve BO/IOVA muhasebesi henuz yok.
+compute tile bellekleri modellendi. `SYNC_BO` dort kombinasyonu da
+isliyor (host/dev x host/dev): cihaz adresleri
+`heap_addr + (D - AIE2_DEVM_BASE)` ile context'in host heap'ine
+cevriliyor, heap disi adresler reddediliyor.
+
+Kalan: BO/IOVA muhasebesi ve BD adreslerinde cihaz adresi cevirisi
+(gercek ctrlcode bunlari DDR_PATCH ile yamiyor).
 
 ## 6. XDNA array mimari modeli
 
