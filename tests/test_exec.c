@@ -29,6 +29,7 @@
 
 #include "drv_model.h"
 #include "ctrlcode.h"
+#include "txn_vectors.h"
 
 /* Host bellek yerlesimi (FW imaji 0x10000..0x50000 arasinda) */
 #define CTRLCODE_ADDR (HOST_MEM_BASE + 0x300000)
@@ -454,6 +455,79 @@ static void test_exec(Host *host, XdnaNpu *npu)
         size = build_loopback_ctrlcode(cc, AIE2_DEVM_BASE + 0x100000, dev_out, XFER_WORDS);
         CHECK(exec_ctrlcode(&ctxd, CTRLCODE_ADDR, size) != 0,
               "heap disi shim adresi reddedilmeli");
+    }
+
+    /*
+     * Derleyicinin kendi encoder'i (mlir-aie TxnEncoding.h) ile uretilmis
+     * ctrlcode. Bizim ureticimizden farki: op basliklarindaki Col/Row
+     * alanlari SIFIR, tile mutlak adrese katilmis. Gercek workload'lar
+     * boyle geliyor.
+     */
+    step("Derleyici encoder'iyle uretilmis ctrlcode calismali");
+    {
+        uint8_t *cc3 = host_ptr(host, CTRLCODE_ADDR + 0x20000);
+
+        CHECK_EQ((uint64_t)HOST_MEM_BASE, TXN_VEC_HOST_BASE,
+                 "vektor host tabani testle ayni olmali");
+        CHECK_EQ((uint64_t)INPUT_ADDR, TXN_VEC_INPUT_ADDR, "vektor giris adresi");
+        CHECK_EQ((uint64_t)OUTPUT_ADDR, TXN_VEC_OUTPUT_ADDR, "vektor cikis adresi");
+        CHECK_EQ(TXN_VEC_WORDS, XFER_WORDS, "vektor transfer boyutu");
+
+        memcpy(cc3, txn_vec_loopback, sizeof(txn_vec_loopback));
+        memset(out, 0, XFER_BYTES);
+        CHECK_EQ(exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x20000,
+                               (uint32_t)sizeof(txn_vec_loopback)), 0,
+                 "derleyici ctrlcode'u durumu");
+        CHECK(memcmp(in, out, XFER_BYTES) == 0,
+              "derleyici ctrlcode'uyla veri array uzerinden gecmedi");
+    }
+
+    /*
+     * Bu vektor, tile'in ADRESTEN cozuldugunu veriyle olcuyor: desen
+     * memory tile (0,1) bellegine blok-yazilip ayni yerden DMA ile
+     * cikariliyor. Tile yanlis cozulurse (op basligindaki sifir col/row
+     * kullanilirsa) desen shim register uzayina gider ve bu kontrol
+     * duser.
+     */
+    step("Derleyici encoder'i: tile adresten cozulmeli (BLOCKWRITE + DMA)");
+    {
+        uint8_t *cc4 = host_ptr(host, CTRLCODE_ADDR + 0x30000);
+
+        memcpy(cc4, txn_vec_blockwrite_out, sizeof(txn_vec_blockwrite_out));
+        memset(out, 0, XFER_BYTES);
+        CHECK_EQ(exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x30000,
+                               (uint32_t)sizeof(txn_vec_blockwrite_out)), 0,
+                 "blockwrite vektoru durumu");
+        CHECK(memcmp(out, txn_vec_pattern, XFER_BYTES) == 0,
+              "blockwrite deseni memory tile'a ulasmadi (tile cozumu?)");
+    }
+
+    /*
+     * BD adresi yamayan op'lar atlanmamali: atlanirsa DMA yanlis adrese
+     * gider ve sonuc sessizce yanlis olur.
+     */
+    step("Hata yolu: DDR_PATCH sessizce atlanmamali");
+    {
+        uint8_t *cc5 = host_ptr(host, CTRLCODE_ADDR + 0x40000);
+        TxnBuild b;
+        uint32_t size5;
+
+        txn_init(&b, cc5);
+        /* CustomOpHdr(8) + payload(40) = 48 bayt, TxnEncoding.h'ye gore. */
+        {
+            struct { OpHdr hdr; uint32_t Size; } c;
+            memset(&c, 0, sizeof(c));
+            c.hdr.Op = XAIE_IO_CUSTOM_OP_DDR_PATCH;
+            c.Size = 48u;
+            memset(cc5 + b.pos, 0, 48);
+            memcpy(cc5 + b.pos, &c, sizeof(c));
+            b.pos += 48u;
+            b.ops++;
+        }
+        size5 = txn_finish(&b);
+
+        CHECK(exec_ctrlcode(&ctxd, CTRLCODE_ADDR + 0x40000, size5) != 0,
+              "DDR_PATCH iceren ctrlcode basarili donmemeli");
     }
 
     step("Asenkron hata bildirimi");

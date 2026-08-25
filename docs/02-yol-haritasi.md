@@ -12,7 +12,7 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 | 5 | Bellek modeli (BO, DMA, heap) | **tile bellegi + DMA tamam, testli** |
 | 6 | XDNA array mimari modeli | **tamam, stream switch dahil** |
 | 7 | AIE instruction interpreter | **cozme katmani tamam**; semantik yok |
-| 8 | ctrlcode motoru | **tamam, testli** |
+| 8 | ctrlcode motoru | **tamam; derleyici ciktisina karsi testli** |
 | 9 | Uctan uca gercek workload | **gercek guest'te veri yolu kostu**; compute eksik |
 | 10 | Uyumluluk + performans | baslanmadi |
 
@@ -339,10 +339,38 @@ baslatma/senkronizasyon.
 
 **Kabul:** gercek bir workload'un ctrlcode'u bastan sona hatasiz yurutulur.
 
-**Durum:** transaction bicimi `aie-rt`'den dogrulandi ve yorumlayici yazildi.
-WRITE, MASKWRITE, MASKPOLL, BLOCKWRITE, BLOCKSET uygulandi. Custom op'lar
-(TCT, DDR_PATCH) ve SHIMDMA_BD op'lari **atlaniyor ve uyari veriliyor** --
-payload yerlesimleri dogrulanmadan uygulanmalari yanlis sonuc uretirdi.
+**Durum:** yorumlayici artik **derleyicinin kendi encoder'ina** karsi
+dogrulaniyor, sadece okunan bir baslige karsi degil.
+
+`tools/gen-txn-vectors.cpp`, `Xilinx/mlir-aie`'nin
+`include/aie/Runtime/TxnEncoding.h` basligini dogrudan `#include` ederek
+ctrlcode uretiyor. O baslik MLIR/LLVM'e bagimli degil ve mlir-aie'nin
+kendi ifadesiyle "the single in-tree source of truth for the instruction
+format, used by both the compiler (AIETargetNPU.cpp) and generated host
+code" -- yani gercek workload'larin ctrlcode'unu ureten kodun ta kendisi.
+
+Bu, gercek workload'lari calistirmayi engelleyen **bir hatayi ortaya
+cikardi**: derleyici op basligindaki `Col`/`Row` alanlarini SIFIR birakip
+tile'i mutlak adrese katiyor (`txn_append_write32`: "txn[pos + 1] is
+reserved (0)"). Yorumlayici baslik alanlarini kullaniyordu, yani
+derleyici ciktisindaki **her yazma tile (0,0)'a gidiyordu**. Artik tile
+adresten cozuluyor; regresyon testi olculdu (eski davranisla iki kontrol
+dusuyor).
+
+Uygulanan: WRITE, MASKWRITE, MASKPOLL, MASKPOLL_BUSY, BLOCKWRITE,
+BLOCKSET, NOOP, TCT.
+
+**BD adresi belirleyen op'lar artik atlanmiyor, HATA donduruyor**
+(`DDR_PATCH`, `CONFIG_SHIMDMA_BD`): atlanirlarsa DMA yanlis adrese gider
+ve sonuc sessizce yanlis olur. Teshis op'lari (`READ_REGS`,
+`RECORD_TIMER`, `MERGE_SYNC`) uyariyla atlaniyor -- onlar hesabin
+sonucunu degistirmiyor.
+
+`DDR_PATCH`'in **kodlamasi artik tam biliniyor** (12 kelime, alan alan
+`docs/04-array-ve-ctrlcode.md`'de). Uygulanmamasinin sebebi iki
+dogrulanmamis nokta: argumanlarin komut icindeki paketlenmesi ve 64-bit
+adresin shim BD'sinin ADDRLO/ADDRHI kelimelerine bolunmesi. Ikisi de
+yanlis olursa DMA yanlis adrese gider.
 
 ## 9. Uctan uca gercek workload
 

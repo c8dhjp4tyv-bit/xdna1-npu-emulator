@@ -186,11 +186,54 @@ Boyutlar `static_assert` ile kilitli:
 
 ### Opcode listesi -- eski kaynak yaniltici
 
-`aie-rt`'nin `main-aie` dali **eski ve kisa** bir opcode listesi tasiyor.
-Gercek ctrlcode, `Xilinx/aiebu` icindeki guncel listeyi kullaniyor:
-aradaki `NOOP`, `PREEMPT`, `MASKPOLL_BUSY`, `LOADPDI`, `LOAD_PM_START`
-opcode'lari eski listede yok. Sadece eski listeye bakmak, opcode
-numaralarini kaydiriyor.
+`aie-rt`'nin `main-aie` dali **eski ve kisa** bir opcode listesi tasiyor:
+
+```c
+XAIE_IO_WRITE, BLOCKWRITE, BLOCKSET, MASKWRITE, MASKPOLL,
+XAIE_CONFIG_SHIMDMA_BD = 5, XAIE_CONFIG_SHIMDMA_DMABUF_BD = 6, ...
+```
+
+Gercek ctrlcode bunu kullanmiyor. Derleyicinin kendi kaynak-doğruluk
+basligi (`Xilinx/mlir-aie`, `include/aie/Runtime/TxnEncoding.h`) konuyu
+acikca uyariyla anlatiyor:
+
+> These DO NOT match the third_party/aie-rt xaie_txn.h enum, which is an
+> older layout (CONFIG_SHIMDMA_BD=5, no NOOP/PREEMPT/LOADPDI block). They
+> match the newer firmware opcodes the compiler emits.
+
+Gecerli liste (bizim `xdna_aie.h` bununla birebir ayni):
+
+```
+WRITE 0  BLOCKWRITE 1  BLOCKSET 2  MASKWRITE 3  MASKPOLL 4
+NOOP 5  PREEMPT 6  MASKPOLL_BUSY 7  LOADPDI 8  LOAD_PM_START 9
+CREATE_SCRATCHPAD 10  UPDATE_STATE_TABLE 11  UPDATE_REG 12
+UPDATE_SCRATCH 13  CONFIG_SHIMDMA_BD 14  CONFIG_SHIMDMA_DMABUF_BD 15
+CUSTOM_OP_BEGIN 128 = TCT  DDR_PATCH 129  READ_REGS 130
+RECORD_TIMER 131  MERGE_SYNC 132
+```
+
+### Tile ADRESTEN cozulur, op basligindan DEGIL
+
+Bu, gercek workload'lari calistirmayi engelleyen bir hataydi ve
+derleyicinin encoder'ina karsi differential test ile yakalandi.
+
+`XAie_OpHdr` bir `Col` ve `Row` alani tasiyor, ama derleyici write32
+uretirken o kelimeyi **rezerve birakip sifir yaziyor** ve tile'i mutlak
+adrese katiyor (`TxnEncoding.h`, `txn_append_write32`: `txn[pos+1] is
+reserved (0)`). `aie-rt`'nin kendi playback'i da adresi dogrudan
+kullaniyor; `OpHdr`'daki alanlar relocation icin bilgi amacli.
+
+Yorumlayici baslik alanlarini kullanirsa **derleyici ciktisindaki her
+yazma tile (0,0)'a gider** -- yani hicbir gercek workload calismaz.
+Emulator artik tile'i adresten cozuyor; baslik alanlari sifir disiysa ve
+adresle celisirse uyari basiyor.
+
+### Header alaninda `DevGen`
+
+Derleyici NPU1 (Phoenix/Hawk Point) icin `devGen = 3` yaziyor
+(`TxnDeviceInfo`: "3 = NPU (PHX/HWK), 4 = NPU2 (STX/KRK)"), `aie-rt`'nin
+`XAIE_DEV_GEN_AIEML = 2` degerini degil. Yorumlayici bu alani yalnizca
+logluyor, davranisa etkisi yok -- ama iki degerin de gorulmesi normal.
 
 ### Op boyutu: iki farkli kural
 
@@ -219,9 +262,16 @@ etmek guvenli degil.
 | `XAIE_IO_BLOCKSET` | uygulandi (serilestirmede BLOCKWRITE'a donusuyor) |
 | `XAIE_IO_NOOP` | uygulandi (dogru boyutla atlaniyor) |
 | `XAIE_IO_CUSTOM_OP_TCT` | **uygulandi** -- asagiya bakin |
-| `XAIE_IO_CUSTOM_OP_DDR_PATCH` | taniniyor, **uygulanmiyor** |
-| `PREEMPT`, `LOADPDI`, `LOAD_PM_START`, `READ_REGS`, `RECORD_TIMER`, `MERGE_SYNC`, `SHIMDMA_BD` | taniniyor, **uygulanmiyor** |
+| `XAIE_IO_CUSTOM_OP_DDR_PATCH` | taniniyor, **uygulanmiyor -> HATA** |
+| `CONFIG_SHIMDMA_BD`, `CONFIG_SHIMDMA_DMABUF_BD` | taniniyor, **uygulanmiyor -> HATA** |
+| `PREEMPT`, `LOADPDI`, `LOAD_PM_START` | taniniyor, dogru boyutla atlaniyor |
+| `READ_REGS`, `RECORD_TIMER`, `MERGE_SYNC` | teshis op'lari, atlaniyor |
 | bilinmeyen opcode | **hata** (boyut bilinemez) |
+
+BD **adresini** belirleyen op'lar (`DDR_PATCH`, `CONFIG_SHIMDMA_BD`)
+atlanmiyor, **hata donduruyor**: atlanirlarsa DMA yanlis adrese gider ve
+sonuc sessizce yanlis olur. Teshis op'larini atlamak sonucu
+degistirmiyor, onlar uyariyla geciliyor.
 
 ### TCT (Task Completion Token)
 
@@ -237,27 +287,46 @@ Bir DMA kanalinin gorevini tamamlamasini bekler. Emulatorde DMA'lar
 gecerliligini dogrulamak. Bu bir tahmin degil, modelimizin dogrudan
 sonucu -- DMA asenkron hale getirilirse burasi gercek beklemeye donusur.
 
-### DDR_PATCH neden uygulanmiyor
+### DDR_PATCH neden hala uygulanmiyor
 
-Payload yerlesimi **dogrulandi** (`aiebu` `xaie_txn.h`, `patch_op_t`):
+**Kodlama artik tam biliniyor** -- derleyicinin kendi encoder'indan
+(`TxnEncoding.h`, `txn_append_address_patch`), 12 kelime = 48 bayt:
 
-```c
-typedef struct {
-    u32 action;
-    u64 regaddr; // yamanacak register adresi
-    u64 argidx;  // deger alinacak kernel arg indeksi
-    u64 argplus; // argidx'teki degere eklenecek offset
-} patch_op_t;   // 32 bayt
+```
+w0  opcode (129)        w1  op boyutu (48)
+w2..w4  rezerve         w5  action (0 = patch)
+w6  yamanacak register adresi     w7  rezerve
+w8  buffer argumani indeksi       w9  rezerve
+w10 argplus (buffer icindeki BAYT offseti)   w11 rezerve
 ```
 
-Anlam da acik: `regaddr`'a `arg[argidx] + argplus` yazilir. Uygulanmamasinin
-sebebi, **argumanlarin komut icindeki yerlesiminin** dogrulanmamis olmasi
-(kelime indeksi mi, 64-bit adresin iki kelimeye bolunmesi nasil). Yanlis
-yamalama sessizce yanlis sonuc uretirdi; bu yuzden op taniniyor, boyutu
-dogru atlaniyor ve uyari veriliyor.
+Anlam da biliniyor (`AIEDmaToNpu.cpp`): yamanacak adres bir shim BD'sinin
+adres kelimesi (`getDmaBdAddress + getDmaBdAddressOffset`) ve oraya
+`arg[argidx] + argplus` yazilir. Derleyici BD'yi once blok-yazip adres
+alanini sifir biraktigi icin "yaz" ile "ekle" ayni sonucu verir
+(`aiebu requires the block-write to precede the address patch and cover
+the patched word`).
 
-Atlanan her op loglaniyor ve kosum sonunda "sonuc eksik olabilir" uyarisi
-veriliyor -- sessiz basarisizlik yok.
+Kalan **iki** dogrulanmamis nokta var ve ikisi de yanlis olursa DMA
+yanlis adrese gider:
+
+1. **Argumanlarin komut icindeki paketlenmesi.** `exec_dpu_req.payload`
+   "properties and regular kernel arguments" tutuyor, `inst_prop_cnt`
+   kadar property onde geliyor. Buffer argumanlarinin 64-bit mi (iki
+   kelime) yoksa 32-bit mi indeksledigi dogrulanmadi.
+2. **64-bit adresin BD'ye bolunmesi.** Yamanacak adres shim BD'sinin
+   `ADDRLO` kelimesi; ust bitlerin `ADDRHI`'ye nasil yerlestigi ve o
+   kelimenin diger alanlarinin nasil korundugu dogrulanmadi.
+
+Ayrica bir kip belirsizligi var: firmware, "instruction buffer" calisma
+kipinde **ilk bes** host argumanina `0x80000000` ekliyor
+(`AIETargetNPU.cpp`: `kDDRAIEAddrOffset`, `kNumFirmwareTranslatedArgs`);
+sonrakiler icin derleyici bu offseti `argplus`'a kendisi katiyor. Tam-ELF
+kipinde ise hicbirine eklenmiyor. Komuta bakarak hangi kipte oldugumuzu
+ayirt edemiyoruz.
+
+Bu yuzden op **hata donduruyor**. Uydurup uygulamak, projedeki tek
+"sessizce yanlis sonuc" kaynagi olurdu.
 
 ### Partition siniri
 
@@ -286,6 +355,40 @@ XRT -> amdxdna -> hwctx mailbox kanali
 
 `MSG_OP_CHAIN_EXEC_DPU` ayni yolu `cmd_chain_slot_dpu` dizisi uzerinde
 tekrarlar ve ilk hatada `fail_cmd_idx` ile birlikte doner.
+
+## 8b. Derleyicinin kendi encoder'ina karsi dogrulama
+
+ctrlcode yorumlayicisi artik "okudugum baslikta boyle yaziyordu"ya degil,
+**derleyicinin urettigi bayt'lara** karsi dogrulaniyor.
+
+`tools/gen-txn-vectors.cpp`, `Xilinx/mlir-aie`'nin
+`include/aie/Runtime/TxnEncoding.h` basligini dogrudan `#include` edip
+ctrlcode uretiyor. O baslik MLIR/LLVM'e bagimli degil ve mlir-aie'nin
+kendi ifadesiyle:
+
+> the single in-tree source of truth for the instruction format, used by
+> both the compiler (AIETargetNPU.cpp) and generated host code
+
+Yani gercek workload'lar icin kullanilan ureticinin ta kendisi.
+
+Uretilen iki vektor (`tests/txn_vectors.h`) `tests/test_exec.c` icinde
+kosuyor:
+
+| Vektor | Ne dogruluyor |
+| --- | --- |
+| `txn_vec_loopback` | 26 op'luk tam veri yolu: host -> shim -> memory tile -> shim -> host. Cikis girisle birebir ayni olmali. |
+| `txn_vec_blockwrite_out` | Tile'in ADRESTEN cozuldugunu **veriyle** olcer: desen memory tile (0,1) bellegine blok-yazilip ayni yerden DMA ile cikarilir. |
+
+Ikinci vektor bir regresyon testi: tile cozumu op basligina geri
+dondurulunce iki kontrol de dusuyor (olculdu).
+
+Yeniden uretim:
+
+```sh
+g++ -std=c++17 -I<mlir-aie>/include -Iinclude \
+    -o gen-txn-vectors tools/gen-txn-vectors.cpp
+./gen-txn-vectors > tests/txn_vectors.h
+```
 
 ## 9. Test
 

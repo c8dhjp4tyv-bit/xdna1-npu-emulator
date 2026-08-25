@@ -27,8 +27,11 @@ src/              QEMU'dan bagimsiz emulator cekirdegi
 tests/            surucu davranisini taklit eden kosumlar
                     aie2_vectors.h       paket uzunlugu altin vektorleri
                     aie2_slot_vectors.h  slot yerlesimi differential vektorleri
+                    txn_vectors.h        derleyici encoder'iyla uretilmis ctrlcode
 tools/            gen-aie2-vectors.py -- altin vektor ureticisi
                   gen-aie2-formats.py -- format tablosu + slot vektorleri
+                  gen-txn-vectors.cpp -- ctrlcode vektorleri (derleyicinin
+                                         kendi encoder'i ile)
 qemu/             QEMU PCI aygiti sarmalayicisi
 docs/             hedef, dogrulanmis donanim arayuzu, yol haritasi, acik sorular
 ```
@@ -53,8 +56,11 @@ olusturma/yok etme, ring buffer sarmalanmasi ve hata yollari.
 
 **test_exec** gercek bicimde bir ctrlcode uretir, `EXEC_DPU` ile gonderir ve
 verinin host -> shim DMA -> memory tile -> shim DMA -> host yolundan birebir
-gectigini dogrular; lock semantigi, BLOCKWRITE, komut zinciri, `SYNC_BO` ve
-dort hata yolu da test edilir.
+gectigini dogrular; lock semantigi, BLOCKWRITE, komut zinciri, `SYNC_BO`,
+cihaz adresi cevirisi ve hata yollari da test edilir. Ayrica
+**derleyicinin kendi encoder'iyla** (mlir-aie `TxnEncoding.h`) uretilmis
+ctrlcode'u kosturur -- yani yorumlayici gercek derleyici ciktisina karsi
+dogrulaniyor.
 
 **test_core** AIE2 paket uzunlugu ve bundle slot cozucusunu `llvm-aie`
 disassembler'iyla uretilmis differential vektorlere karsi dogrular, sonra
@@ -75,7 +81,7 @@ okur/yazar.
 | 5. Bellek modeli / DMA | tile bellegi + DMA tamam, testli |
 | 6. XDNA array modeli | tamam, stream switch dahil |
 | 7. AIE instruction interpreter | **cozme katmani tamam**; semantik yok |
-| 8. ctrlcode motoru | tamam, testli |
+| 8. ctrlcode motoru | tamam; **derleyici ciktisina karsi testli** |
 | 9. Uctan uca workload | **gercek guest'te veri yolu calisti**; compute eksik |
 | 10. Uyumluluk + performans | baslanmadi |
 

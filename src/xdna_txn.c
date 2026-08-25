@@ -89,14 +89,48 @@ typedef struct {
 } TctOp;
 
 /*
- * DDR_PATCH payload -- aiebu xaie_txn.h patch_op_t.
- * Anlam: regaddr'a, `argidx` numarali kernel argumaninin degeri + argplus
- * yazilir. Yapinin yerlesimi DOGRULANDI; ancak argumanlarin komut
- * icindeki yerlesimi (kelime indeksi mi, 64-bit degerin bolunmesi vs.)
- * dogrulanmadi, bu yuzden op UYGULANMIYOR -- yanlis yamalama sessizce
- * yanlis sonuc uretirdi.
+ * DDR_PATCH payload.
+ *
+ * Yerlesim DERLEYICININ KENDI ENCODER'INDAN dogrulandi -- mlir-aie
+ * include/aie/Runtime/TxnEncoding.h, txn_append_address_patch():
+ *
+ *   w0  = opcode (DDR_PATCH)          } CustomOpHdr
+ *   w1  = op boyutu (48 bayt)         }
+ *   w2..w4 = rezerve (0)
+ *   w5  = action (0 = patch)
+ *   w6  = yamanacak register adresi
+ *   w7  = rezerve (0)
+ *   w8  = buffer argumaninin indeksi
+ *   w9  = rezerve (0)
+ *   w10 = argplus -- buffer icindeki BAYT offseti
+ *   w11 = rezerve (0)
+ *
+ * Anlam (AIETargetNPU.cpp + AIEDmaToNpu.cpp): yamanacak adres bir shim
+ * BD'sinin adres kelimesidir (getDmaBdAddress + getDmaBdAddressOffset) ve
+ * oraya `argidx` numarali host buffer argumaninin adresi + `argplus`
+ * yazilir. Derleyici BD'yi once blok-yazip adres alanini sifir biraktigi
+ * icin "yaz" ile "ekle" pratikte ayni sonucu verir.
+ *
+ * OP HALA UYGULANMIYOR. Kodlama artik tam biliniyor ama iki nokta
+ * dogrulanmadi ve ikisi de yanlis olursa DMA yanlis adrese gider:
+ *
+ *   1. Argumanlarin komut icindeki paketlenmesi. exec_dpu_req.payload
+ *      "properties and regular kernel arguments" tutuyor ve
+ *      inst_prop_cnt kadar property onde geliyor; buffer argumanlari
+ *      64-bit mi (2 kelime) yoksa 32-bit mi indeksleniyor dogrulanmadi.
+ *   2. 64-bit adresin shim BD'sinin ADDRLO/ADDRHI kelimelerine nasil
+ *      bolundugu ve ADDRHI'nin diger alanlarinin nasil korundugu.
+ *
+ * Ayrica firmware, "instruction buffer" calisma kipinde ILK BES host
+ * argumanina 0x80000000 ekliyor (AIETargetNPU.cpp: kDDRAIEAddrOffset,
+ * kNumFirmwareTranslatedArgs); sonrakiler icin derleyici bu offseti
+ * argplus'a kendisi katiyor. Hangi kipte oldugumuzu komuttan ayirt
+ * edemiyoruz.
+ *
+ * Uydurup uygulamak, sessizce yanlis sonuc ureten tek yer olurdu.
  */
 typedef struct {
+    uint32_t rsvd[3];
     uint32_t action;
     uint64_t regaddr;
     uint64_t argidx;
@@ -104,7 +138,9 @@ typedef struct {
 } PatchOp;
 
 static_assert(sizeof(TctOp) == 8, "TCT payload");
-static_assert(sizeof(PatchOp) == 32, "patch_op_t");
+static_assert(sizeof(PatchOp) == 40, "DDR_PATCH payload (TxnEncoding.h)");
+static_assert(sizeof(CustomOpHdr) + sizeof(PatchOp) == 48,
+              "DDR_PATCH op boyutu 12 kelime");
 
 /*
  * MASKPOLL, donanimda "kosul saglanana kadar bekle" demek. Emulatorde
@@ -146,6 +182,41 @@ static bool txn_tile(TxnCtx *tc, uint8_t col, uint8_t row, uint8_t *out_col)
     }
     *out_col = (uint8_t)abs;
     return true;
+}
+
+/*
+ * Tile'i ADRESTEN coz.
+ *
+ * Op basligindaki Col/Row alanlarina GUVENILMEZ: mlir-aie derleyicisi
+ * (include/aie/Runtime/TxnEncoding.h, "the single in-tree source of truth
+ * for the instruction format") write32 icin o kelimeyi rezerve birakip
+ * SIFIR yaziyor ve tile'i mutlak adrese katiyor. aie-rt'nin kendi
+ * playback'i (XAie_TxnPlay) da adresi dogrudan kullaniyor; OpHdr'daki
+ * Col/Row yalnizca relocation icin bilgi amacli.
+ *
+ * Adresten cozmezsek derleyici ciktisindaki HER yazma tile (0,0)'a
+ * giderdi -- yani gercek hicbir workload calismazdi.
+ *
+ * Baslik alanlari sifir disi ise (bizim ureticimiz gibi) adresle
+ * tutarli olmalari beklenir; tutarsizlik acikca raporlanir.
+ */
+static bool txn_tile_from_addr(TxnCtx *tc, uint64_t reg_off, uint8_t hdr_col,
+                               uint8_t hdr_row, uint8_t *out_col,
+                               uint8_t *out_row, uint32_t *out_off)
+{
+    uint8_t col = (uint8_t)AIE_ADDR_COL(reg_off);
+    uint8_t row = (uint8_t)AIE_ADDR_ROW(reg_off);
+
+    if ((hdr_col || hdr_row) && (hdr_col != col || hdr_row != row)) {
+        xdna_log(tc->npu, XDNA_LOG_WARN,
+                 "ctrlcode: op basligi tile (%u,%u) diyor ama adres (%u,%u) "
+                 "-- adres esas alindi",
+                 hdr_col, hdr_row, col, row);
+    }
+
+    *out_row = row;
+    *out_off = (uint32_t)AIE_ADDR_OFF(reg_off);
+    return txn_tile(tc, col, row, out_col);
 }
 
 static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
@@ -207,7 +278,8 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
     while (pos < size) {
         OpHdr op;
         uint32_t op_size = 0;
-        uint8_t col;
+        uint32_t off = 0;
+        uint8_t col, row;
 
         if (pos + sizeof(op) > size) {
             xdna_log(npu, XDNA_LOG_ERROR,
@@ -225,36 +297,36 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
             }
             memcpy(&w, buf + pos, sizeof(w));
             op_size = w.Size ? w.Size : (uint32_t)sizeof(w);
-            if (!txn_tile(&tc, op.Col, op.Row, &col)) {
+            if (!txn_tile_from_addr(&tc, w.RegOff, op.Col, op.Row, &col, &row,
+                                    &off)) {
                 return -1;
             }
-            xdna_array_write32(tc.arr, col, op.Row,
-                               (uint32_t)w.RegOff & AIE_TILE_OFF_MASK, w.Value);
+            xdna_array_write32(tc.arr, col, row, off, w.Value);
             break;
         }
 
         case XAIE_IO_MASKWRITE: {
             MaskWrite32Hdr w;
-            uint32_t off, cur;
+            uint32_t cur;
 
             if (pos + sizeof(w) > size) {
                 goto truncated;
             }
             memcpy(&w, buf + pos, sizeof(w));
             op_size = w.Size ? w.Size : (uint32_t)sizeof(w);
-            if (!txn_tile(&tc, op.Col, op.Row, &col)) {
+            if (!txn_tile_from_addr(&tc, w.RegOff, op.Col, op.Row, &col, &row,
+                                    &off)) {
                 return -1;
             }
-            off = (uint32_t)w.RegOff & AIE_TILE_OFF_MASK;
-            cur = xdna_array_read32(tc.arr, col, op.Row, off);
-            xdna_array_write32(tc.arr, col, op.Row, off,
+            cur = xdna_array_read32(tc.arr, col, row, off);
+            xdna_array_write32(tc.arr, col, row, off,
                                (cur & ~w.Mask) | (w.Value & w.Mask));
             break;
         }
 
         case XAIE_IO_MASKPOLL: {
             MaskWrite32Hdr w;   /* MaskPoll32Hdr ile ayni yerlesim */
-            uint32_t off, tries = 0;
+            uint32_t tries = 0;
             bool ok = false;
 
             if (pos + sizeof(w) > size) {
@@ -262,12 +334,12 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
             }
             memcpy(&w, buf + pos, sizeof(w));
             op_size = w.Size ? w.Size : (uint32_t)sizeof(w);
-            if (!txn_tile(&tc, op.Col, op.Row, &col)) {
+            if (!txn_tile_from_addr(&tc, w.RegOff, op.Col, op.Row, &col, &row,
+                                    &off)) {
                 return -1;
             }
-            off = (uint32_t)w.RegOff & AIE_TILE_OFF_MASK;
             while (tries++ < TXN_MASKPOLL_LIMIT) {
-                if ((xdna_array_read32(tc.arr, col, op.Row, off) & w.Mask) ==
+                if ((xdna_array_read32(tc.arr, col, row, off) & w.Mask) ==
                     (w.Value & w.Mask)) {
                     ok = true;
                     break;
@@ -277,7 +349,7 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
                 xdna_log(npu, XDNA_LOG_ERROR,
                          "ctrlcode: op %u MASKPOLL zaman asimi "
                          "(tile %u,%u offset 0x%x mask 0x%x deger 0x%x)",
-                         op_index, col, op.Row, off, w.Mask, w.Value);
+                         op_index, col, row, off, w.Mask, w.Value);
                 return -1;
             }
             break;
@@ -302,7 +374,12 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
              * genisletilmis haldedir.
              */
             words = (op_size - (uint32_t)sizeof(w)) / 4u;
-            if (!txn_tile(&tc, op.Col, op.Row, &col)) {
+            /*
+             * BLOCKWRITE'ta derleyici col/row'u ayri bir kelimeye de
+             * koyuyor ama adres yine mutlak; tile'i adresten cozuyoruz.
+             */
+            if (!txn_tile_from_addr(&tc, w.RegOff, op.Col, op.Row, &col, &row,
+                                    &off)) {
                 return -1;
             }
             {
@@ -312,9 +389,7 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
                 for (k = 0; k < words; k++) {
                     uint32_t v;
                     memcpy(&v, payload + k * 4u, 4);
-                    xdna_array_write32(tc.arr, col, op.Row,
-                                       (w.RegOff & AIE_TILE_OFF_MASK) + k * 4u,
-                                       v);
+                    xdna_array_write32(tc.arr, col, row, off + k * 4u, v);
                 }
             }
             break;
@@ -327,7 +402,7 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
              * isliyoruz (en yakin okuma).
              */
             MaskWrite32Hdr w;
-            uint32_t off, tries = 0;
+            uint32_t tries = 0;
             bool ok = false;
 
             if (pos + sizeof(w) > size) {
@@ -335,12 +410,12 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
             }
             memcpy(&w, buf + pos, sizeof(w));
             op_size = w.Size ? w.Size : (uint32_t)sizeof(w);
-            if (!txn_tile(&tc, op.Col, op.Row, &col)) {
+            if (!txn_tile_from_addr(&tc, w.RegOff, op.Col, op.Row, &col, &row,
+                                    &off)) {
                 return -1;
             }
-            off = (uint32_t)w.RegOff & AIE_TILE_OFF_MASK;
             while (tries++ < TXN_MASKPOLL_LIMIT) {
-                if ((xdna_array_read32(tc.arr, col, op.Row, off) & w.Mask) ==
+                if ((xdna_array_read32(tc.arr, col, row, off) & w.Mask) ==
                     (w.Value & w.Mask)) {
                     ok = true;
                     break;
@@ -417,14 +492,31 @@ static int txn_run(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,
             break;
 
         case XAIE_IO_CUSTOM_OP_DDR_PATCH:
-        case XAIE_IO_CUSTOM_OP_READ_REGS:
-        case XAIE_IO_CUSTOM_OP_RECORD_TIMER:
-        case XAIE_IO_CUSTOM_OP_MERGE_SYNC:
         case XAIE_CONFIG_SHIMDMA_BD:
         case XAIE_CONFIG_SHIMDMA_DMABUF_BD: {
             /*
-             * Taniyoruz ama uygulamiyoruz. Kayit kendi boyutunu tasidigi
-             * icin dogru atlayabiliyoruz; sessizce gecmiyoruz.
+             * Bu op'lar BD ADRESLERINI belirliyor. Atlanirlarsa DMA
+             * yanlis adrese gider ve sonuc SESSIZCE yanlis olur -- yani
+             * atlamak, hata dondurmekten daha kotu. Durup hata donuyoruz.
+             * DDR_PATCH icin kodlama biliniyor, eksik olan ne oldugu
+             * yukarida PatchOp yorumunda yaziyor.
+             */
+            xdna_log(npu, XDNA_LOG_ERROR,
+                     "ctrlcode: op %u (opcode %u) BD adresi yamiyor ama "
+                     "uygulanmadi -- sessizce yanlis sonuc uretmemek icin "
+                     "duruldu",
+                     op_index, op.Op);
+            return -1;
+        }
+
+        case XAIE_IO_CUSTOM_OP_READ_REGS:
+        case XAIE_IO_CUSTOM_OP_RECORD_TIMER:
+        case XAIE_IO_CUSTOM_OP_MERGE_SYNC: {
+            /*
+             * Taniyoruz ama uygulamiyoruz. Bunlar teshis/olcum op'lari;
+             * atlanmalari hesabin sonucunu degistirmiyor. Kayit kendi
+             * boyutunu tasidigi icin dogru atlayabiliyoruz; sessizce
+             * gecmiyoruz.
              */
             CustomOpHdr c;
 
