@@ -15,7 +15,20 @@ Bu dizin, emulatoru **gercek bir Linux guest'i icinde degistirilmemis
   ext cap @0x100 id=0x000f (ATS)
   ext cap @0x140 id=0x0013 (PRI)
   ext cap @0x180 id=0x001b (PASID)
-  /dev/accel/accel0 ACILAMADI
+  /dev/accel/accel0 ACILAMADI (SVA yok)
+  carveout ayarlandi: 0x4000000@0x60000000
+  /sys/kernel/debug/accel/0000:00:03.0/carveout = 0x4000000@0x60000000
+  /dev/accel/accel0 ACILDI (carveout ile, fd=3)
+  --- DRM ioctl'leri (stock UAPI) ---
+  QUERY_AIE_VERSION      = 2.0
+  QUERY_FIRMWARE_VERSION = 5.7.0.0
+  QUERY_AIE_METADATA     = 5 sutun, sutun boyu 8192
+    core: 4 satir @2, mem: 1 satir @1, shim: 1 satir @0
+  CREATE_BO(DEV_HEAP)    = handle 1, 67108864 bayt
+  GET_BO_INFO            = xdna_addr 0x4000000, map_offset 0x100000000
+  heap mmap              = 0x7febab18c000
+  CREATE_HWCTX           = handle 1, syncobj 1
+  DESTROY_HWCTX          = tamam
 ########## TEST BITTI ##########
 ```
 
@@ -27,11 +40,37 @@ Yani stock surucu:
 - mailbox uzerinden surum sorgularini yapti (`fw_version = 5.7.0.0`
   bizim emule ettigimiz firmware surumu),
 - cihazi `RyzenAI-npu1` olarak tanidi,
-- `/dev/accel/accel0` olusturdu.
+- `/dev/accel/accel0` olusturdu,
+- **`/dev/accel/accel0` acildi** ve DRM ioctl'leri emulatordan gercek
+  degerler dondurdu,
+- **donanim context'i olusturuldu ve yok edildi**.
 
-**Acilamayan tek sey `/dev/accel/accel0` open()**: surucu client
-acildiginda `iommu_sva_bind_device()` cagiriyor ve QEMU'nun vIOMMU'sunda
-SVA baglanmiyor. Ayrintili analiz: `docs/03-acik-sorular.md`.
+### SVA engeli ve surucunun kendi yedek yolu: carveout
+
+Surucu client acildiginda `iommu_sva_bind_device()` cagiriyor; QEMU
+vIOMMU'sunda SVA baglanmiyor (analiz: `docs/03-acik-sorular.md`). Uzun
+sure `/dev/accel/accel0` bu yuzden acilamiyordu.
+
+Ama `amdxdna_drm_open` PASID alinamadiginda **carveout** yapilandirilmissa
+open()'i basarili sayiyor (`amdxdna_pci_drv.c`). Carveout, surucunun kendi
+debugfs arayuzunden ayarlanan, fiziksel olarak surekli bir bellek blogu:
+
+```
+/sys/kernel/debug/accel/<pci-adresi>/carveout  <-  "<boyut>@<adres>"
+```
+
+Bu **stock surucunun kendi ozelligi**; guest tarafinda hicbir sey
+degistirilmiyor. Tek gereken, o fiziksel bolgenin kernel tarafindan
+kullanilmiyor olmasi -- `run.sh` cekirdek komut satirina
+`memmap=64M$0x60000000` ekliyor, `init.c` de `0x4000000@0x60000000`
+yaziyor.
+
+Sonrasinda BO'lar bu blogtan ayriliyor ve `CREATE_HWCTX` calisiyor.
+Cihaz heap'inin **mmap edilmesi sart**: surucu context olustururken
+heap'in user VA'sini firmware'e bildiriyor, mmap edilmemis heap ile
+`CREATE_HWCTX` "Heap 0 is not mapped" diyor.
+
+SVA yine de dogru cozum; carveout onu gerektirmeyen bir yol aciyor.
 
 ## Kurulum
 
@@ -49,6 +88,7 @@ make defconfig
   --enable DRM --enable DRM_ACCEL --enable DRM_ACCEL_AMDXDNA \
   --enable AMD_IOMMU --enable IOMMU_SUPPORT \
   --enable BLK_DEV_INITRD --enable DEVTMPFS --enable DEVTMPFS_MOUNT \
+  --enable DEBUG_FS \
   --set-str INITRAMFS_SOURCE "/path/to/initramfs" \
   --enable SERIAL_8250 --enable SERIAL_8250_CONSOLE \
   --enable DEBUG_INFO_NONE
@@ -62,7 +102,9 @@ make -j$(nproc) bzImage
 
 ```sh
 mkdir -p initramfs/{proc,sys,dev,lib/firmware/amdnpu/1502_00}
-gcc -static -O2 -o initramfs/init init.c
+# UAPI basliklari kernel kaynagindan geliyor (DRM ioctl'leri icin).
+gcc -static -O2 -Wno-cpp -I/path/to/linux/include/uapi \
+    -o initramfs/init init.c
 # Surucu firmware dosyasinin VAR OLMASINI bekliyor; icerigi onemli degil,
 # emulator yalnizca okunabilirligini dogruluyor.
 head -c 262144 /dev/urandom > initramfs/lib/firmware/amdnpu/1502_00/npu.sbin
@@ -91,3 +133,6 @@ IOMMU=amd ./run.sh
   `virt_to_phys()` ile veriyor, yani DMA API'sini atliyor. Emulator bunu
   ayri bir `phys_read` callback'i ile modelliyor; aksi halde IOMMU ceviri
   modundayken firmware yukleme sayfa hatasi veriyor.
+- **SVA baglanmiyor.** `/dev/accel/accel0` acmak icin carveout yolu
+  kullaniliyor (yukariya bakin). Bu, `CONFIG_DEBUG_FS=y` ve debugfs'in
+  bagli olmasini gerektiriyor.

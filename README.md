@@ -70,7 +70,7 @@ okur/yazar.
 | --- | --- |
 | 1. PCI kabugu | **QEMU'da derlendi ve dogrulandi** |
 | 2. Surucu boot'u | **gercek guest'te dogrulandi** |
-| 3. Guest IOMMU (SVA/PASID) | deneyle karakterize; vIOMMU engeli |
+| 3. Guest IOMMU (SVA/PASID) | SVA yok; **carveout ile asildi** |
 | 4. Yonetim firmware'i (MERT) | **gercek guest'te dogrulandi** |
 | 5. Bellek modeli / DMA | tile bellegi + DMA tamam, testli |
 | 6. XDNA array modeli | tamam, stream switch dahil |
@@ -90,14 +90,27 @@ surucusuyle** kosturuldu:
 /dev/accel: accel0
 /sys/class/accel/accel0/device/vbnv = RyzenAI-npu1
 /sys/class/accel/accel0/device/fw_version = 5.7.0.0
+/dev/accel/accel0 ACILDI (carveout ile, fd=3)
+QUERY_AIE_VERSION      = 2.0
+QUERY_FIRMWARE_VERSION = 5.7.0.0
+QUERY_AIE_METADATA     = 5 sutun, sutun boyu 8192
+  core: 4 satir @2, mem: 1 satir @1, shim: 1 satir @0
+CREATE_BO(DEV_HEAP)    = handle 1, 67108864 bayt
+GET_BO_INFO            = xdna_addr 0x4000000, map_offset 0x100000000
+CREATE_HWCTX           = handle 1, syncobj 1
+DESTROY_HWCTX          = tamam
 ```
 
 Surucu aygiti buldu, SMU guc dizisini ve PSP firmware yuklemesini gecti,
 firmware el sikismasini tamamladi, mailbox uzerinden surum sorgularini
-yapti ve `/dev/accel/accel0` olusturdu.
+yapti, `/dev/accel/accel0` olusturdu; guest **stock DRM UAPI'siyle**
+aygiti acti, bilgi sorgularini yapti, cihaz heap'i BO'su olusturup mmap
+etti ve donanim context'i olusturup yok etti.
 
-`/dev/accel/accel0` **open()** edilemiyor: surucu client acildiginda
-`iommu_sva_bind_device()` cagiriyor ve QEMU vIOMMU'sunda SVA baglanmiyor.
+`iommu_sva_bind_device()` QEMU vIOMMU'sunda hala baglanmiyor. Aygiti acmak
+icin **surucunun kendi carveout yolu** kullaniliyor: stock surucu, PASID
+alinamadiginda debugfs'ten ayarlanmis bir carveout bellek blogu varsa
+`open()`'i basarili sayiyor. Guest tarafinda hicbir sey degistirilmiyor.
 Kurulum, tekrar uretim ve tam analiz: [`qemu/guest-test/`](qemu/guest-test/)
 ve [`docs/03-acik-sorular.md`](docs/03-acik-sorular.md).
 

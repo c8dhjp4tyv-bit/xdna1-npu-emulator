@@ -7,7 +7,7 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 | --- | --- | --- |
 | 1 | PCI kabugu | **derlendi ve dogrulandi** |
 | 2 | Surucu boot'u (PSP/SMU/firmware) | **gercek guest'te dogrulandi** |
-| 3 | Guest IOMMU: SVA/PASID | deneyle karakterize edildi; vIOMMU engeli |
+| 3 | Guest IOMMU: SVA/PASID | SVA yok; **carveout yoluyla asildi** |
 | 4 | Yonetim firmware'i (MERT) | **gercek guest'te dogrulandi** |
 | 5 | Bellek modeli (BO, DMA, heap) | **tile bellegi + DMA tamam, testli** |
 | 6 | XDNA array mimari modeli | **tamam, stream switch dahil** |
@@ -72,11 +72,41 @@ Ayrintili degerlendirme: `docs/03-acik-sorular.md`.
 **Kabul:** guest'te `iommu_sva_bind_device()` gercekten basarili doner ve
 her process kendi PASID'i ile ayri context alir.
 
-**Durum:** deneyle karakterize edildi, kapanmadi. Aygit tarafinda
-yapilabilecek her sey yapildi: ATS + PRI + PASID genisletilmis yetenekleri
-bildiriliyor ve guest bunlari goruyor. Kalan engel QEMU vIOMMU / kernel SVA
-etkinlestirme yolunda. `force_iova=1` kurtarici degil -- probe'u tamamen
-basarisiz kiliyor. Tum deney sonuclari: `docs/03-acik-sorular.md`.
+**Durum:** SVA'nin kendisi kapanmadi ama **pratik engel asildi**.
+
+Aygit tarafinda yapilabilecek her sey yapildi: ATS + PRI + PASID
+genisletilmis yetenekleri bildiriliyor ve guest bunlari goruyor. Kalan
+engel QEMU vIOMMU / kernel SVA etkinlestirme yolunda. `force_iova=1`
+kurtarici degil -- probe'u tamamen basarisiz kiliyor. Tum deney sonuclari:
+`docs/03-acik-sorular.md`.
+
+**Yedek yol: carveout.** Stock surucu, PASID alinamadiginda carveout
+bellek yapilandirilmissa `open()`'i basarili sayiyor
+(`amdxdna_pci_drv.c`: "PASID unavailable and carveout not configured").
+Carveout, surucunun kendi debugfs arayuzunden ayarlanan fiziksel olarak
+surekli bir blok:
+
+```
+/sys/kernel/debug/accel/<pci-adresi>/carveout  <-  "0x4000000@0x60000000"
+```
+
+Guest tarafinda hicbir sey degistirilmiyor; bu surucunun kendi ozelligi.
+Bolgeyi cekirdek komut satirinda `memmap=64M$0x60000000` ile ayirmak
+yeterli. Sonrasinda gercek guest'te:
+
+```
+/dev/accel/accel0 ACILDI (carveout ile, fd=3)
+QUERY_AIE_VERSION      = 2.0
+QUERY_FIRMWARE_VERSION = 5.7.0.0
+QUERY_AIE_METADATA     = 5 sutun, sutun boyu 8192
+CREATE_BO(DEV_HEAP)    = handle 1, 67108864 bayt
+CREATE_HWCTX           = handle 1, syncobj 1
+DESTROY_HWCTX          = tamam
+```
+
+Yani asama 4 ve 5, artik **gercek DRM UAPI uzerinden** de dogrulanmis
+durumda: sorgular, BO olusturma/mmap ve context yasam dongusu guest'ten
+emulatore kadar isliyor.
 
 ## 4. Yonetim firmware'i (MERT)
 
