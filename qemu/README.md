@@ -4,34 +4,49 @@
 icindedir. Buradaki tek is QEMU'nun PCI/MMIO/MSI-X/DMA arayuzlerini
 `XdnaHostOps` callback'lerine baglamak.
 
-> **Bu dosya bu depoda derlenmemistir.** Konteynerde QEMU kaynak agaci yok.
-> Asagidaki adimlar denenmemis olabilir; ilk derlemede kucuk API
-> uyusmazliklari cikmasi normal (ozellikle `ResettableClass` faz imzasi ve
-> `pci_dma_read/write` donus tipi QEMU surumleri arasinda degisti).
+> **Durum: derlendi ve dogrulandi.** QEMU master agacinda (2026-08) derlenip
+> calistirildi; aygit `-device xdna-npu` ile ornekleniyor ve PCI kimligi,
+> sinif kodu ve uc BAR bekledigimiz gibi gorunuyor:
+>
+> ```
+> class Class 1200, addr 00:01.0, pci id 1022:1502
+> bar 0: mem [0x7fffe]   bar 2: mem [0x3fffe]   bar 4: mem [0xfffe]
+> ```
+>
+> Derleme sirasinda uc API uyusmazligi duzeltildi: `qdev-properties.h`
+> artik `hw/core/` altinda, `class_init` imzasi `const void *data` aldi,
+> `LOG_TRACE` yerine `LOG_UNIMP` kullaniliyor. Eski QEMU surumlerinde
+> `ResettableClass` faz imzasi farkli olabilir.
 
 ## Kurulum
 
 ```sh
-git clone https://gitlab.com/qemu-project/qemu.git
+git clone --depth 1 https://gitlab.com/qemu-project/qemu.git
 cd qemu
 
-# Emulator cekirdegini ve aygiti agaca bagla
-cp -r /path/to/xdna1-npu-emulator/src        hw/misc/xdna/
-cp -r /path/to/xdna1-npu-emulator/include    hw/misc/xdna/include
-cp /path/to/xdna1-npu-emulator/qemu/hw/misc/xdna_npu.c hw/misc/
+# Emulator cekirdegini ve aygiti agaca bagla.
+# DIKKAT: basliklar hw/misc/xdna/xdna/ altinda olmali; kaynaklardaki
+# #include "xdna/..." satirlari dosyanin kendi dizinine gore cozuluyor.
+R=/path/to/xdna1-npu-emulator
+mkdir -p hw/misc/xdna/xdna
+cp $R/src/*.c $R/src/*.h            hw/misc/xdna/
+cp $R/include/xdna/*.h              hw/misc/xdna/xdna/
+cp $R/qemu/hw/misc/xdna_npu.c       hw/misc/xdna/
 ```
 
 `hw/misc/meson.build` icine:
 
 ```meson
 system_ss.add(when: 'CONFIG_XDNA_NPU', if_true: files(
-  'xdna_npu.c',
+  'xdna/xdna_npu.c',
   'xdna/xdna_device.c',
   'xdna/xdna_psp.c',
   'xdna/xdna_smu.c',
   'xdna/xdna_fw.c',
   'xdna/xdna_mailbox.c',
   'xdna/xdna_mert.c',
+  'xdna/xdna_array.c',
+  'xdna/xdna_txn.c',
 ))
 ```
 
@@ -41,16 +56,19 @@ system_ss.add(when: 'CONFIG_XDNA_NPU', if_true: files(
 config XDNA_NPU
     bool
     default y if PCI_DEVICES
-    depends on PCI
+    depends on PCI && MSI_NONBROKEN
 ```
 
-Include yolu icin `hw/misc/meson.build` basina:
+Ayri bir include yolu gerekmiyor: yerlesim dogru oldugunda
+`#include "xdna/..."` satirlari kendiliginden cozuluyor.
 
-```meson
-xdna_inc = include_directories('xdna/include')
+Derleme:
+
+```sh
+./configure --target-list=x86_64-softmmu --disable-docs --disable-tools
+ninja -C build
+build/qemu-system-x86_64 -device help | grep xdna
 ```
-
-ve `system_ss.add(...)` cagrisina `include_directories: xdna_inc` ekleyin.
 
 ## Calistirma
 

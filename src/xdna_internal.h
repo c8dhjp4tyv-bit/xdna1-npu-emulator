@@ -108,6 +108,33 @@ typedef struct {
     uint32_t used;
 } AieRegMap;
 
+/* Stream verisi icin basit FIFO. */
+typedef struct {
+    uint8_t *buf;
+    size_t cap;
+    size_t len;
+    size_t rd;
+} AieStream;
+
+/* Stream switch port sinifi */
+typedef enum {
+    AIE_PC_NONE = 0,
+    AIE_PC_CORE,
+    AIE_PC_DMA,
+    AIE_PC_CTRL,
+    AIE_PC_FIFO,
+    AIE_PC_SOUTH,
+    AIE_PC_WEST,
+    AIE_PC_NORTH,
+    AIE_PC_EAST,
+    AIE_PC_TRACE,
+} AiePortClass;
+
+typedef struct {
+    uint8_t cls;   /* AiePortClass */
+    uint8_t idx;   /* sinif icindeki alt indeks */
+} AiePortDesc;
+
 typedef struct {
     AieTileKind kind;
     uint8_t col, row;
@@ -125,16 +152,17 @@ typedef struct {
     uint32_t core_ctrl;
     uint32_t core_status;
 
+    /* Stream switch */
+    uint32_t ss_master[AIE_SS_MAX_PORTS];
+    uint32_t ss_slave[AIE_SS_MAX_PORTS];
+    uint32_t shim_mux;      /* yalnizca shim */
+    uint32_t shim_demux;    /* yalnizca shim */
+
+    /* S2MM kanal basina giris FIFO'su (stream switch'ten gelen veri) */
+    AieStream in_fifo[AIE_MAX_DMA_CH];
+
     AieRegMap regs;
 } AieTile;
-
-/* Kolon basina stream FIFO -- stream switch modeli yerine gecici. */
-typedef struct {
-    uint8_t *buf;
-    size_t cap;
-    size_t len;
-    size_t rd;
-} AieStream;
 
 typedef struct {
     uint64_t dma_tasks;
@@ -142,12 +170,13 @@ typedef struct {
     uint64_t lock_ops;
     uint64_t core_starts;
     uint64_t txn_ops;
+    uint64_t stream_hops;
+    uint64_t stream_drops;
 } AieStats;
 
 typedef struct XdnaArray {
     XdnaNpu *npu;
     AieTile tile[AIE_NUM_COLS][AIE_NUM_ROWS];
-    AieStream stream[AIE_NUM_COLS];
     AieStats stats;
 } XdnaArray;
 
@@ -221,7 +250,8 @@ struct XdnaNpu {
 
 /* --- ic API --- */
 
-void xdna_log(XdnaNpu *npu, int level, const char *fmt, ...);
+void xdna_log(XdnaNpu *npu, int level, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
 
 /* PSP / SMU durum makineleri */
 void xdna_psp_kick(XdnaNpu *npu);

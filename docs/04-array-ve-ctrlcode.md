@@ -99,16 +99,67 @@ acquire lock (varsa) -> veri transferi -> release lock (varsa) -> next BD
 Shim tile icin adres host fiziksel adresidir (DMA callback'i uzerinden);
 memory ve compute tile icin tile-yerel bellek offsetidir.
 
-### Bilinen basitlestirme: stream switch
+## 6b. Stream switch
 
-Gercek donanimda tile'lar arasi veri, stream switch uzerinden yonlendirilen
-paketlerle akar. Stream switch konfigurasyon registerlarinin tam yerlesimi
-henuz modellenmedi; su an **kolon basina tek bir FIFO** var: MM2S yazar,
-S2MM okur.
+Tile'lar arasi veri, stream switch uzerinden akar. Devre anahtarlamali
+(circuit-switched) yonlendirme modellendi:
 
-Bu, kolon ici tek yollu veri hareketini dogru modelliyor. Kolonlar arasi
-yonlendirme ve coklu eszamanli paket akisi icin gercek stream switch modeli
-gerekiyor. Bu, yol haritasindaki asama 6'nin kalan parcasi.
+```
+MASTER_CONFIG[m].CONFIGURATION = bu master portu besleyen slave port
+MASTER_CONFIG[m].MASTER_ENABLE = baglanti etkin mi
+SLAVE_CONFIG[s].SLAVE_ENABLE   = slave port etkin mi
+```
+
+Register tabanlari: compute tile master 0x3F000 / slave 0x3F100, memory tile
+0xB0000 / 0xB0100, shim 0x3F000 / 0x3F100. Port indeksi = register
+siralamasi.
+
+### Port tablolari
+
+| Tile | Master portlari | Slave portlari |
+| --- | --- | --- |
+| compute | CORE0, DMA0-1, TILE_CTRL, FIFO0, SOUTH0-3, WEST0-3, NORTH0-5, EAST0-3 | CORE0, DMA_0-1, TILE_CTRL, FIFO_0, SOUTH_0-5, WEST_0-3, NORTH_0-3, EAST_0-3, AIE_TRACE, MEM_TRACE |
+| memory | DMA0-5, TILE_CTRL, SOUTH0-3, NORTH0-5 | DMA_0-5, TILE_CTRL, SOUTH_0-5, NORTH_0-3, TRACE |
+| shim | TILE_CTRL, FIFO0, SOUTH0-5, WEST0-3, NORTH0-5, EAST0-3 | TILE_CTRL, FIFO_0, SOUTH_0-7, WEST_0-3, NORTH_0-3, EAST_0-3, TRACE |
+
+### Komsu baglantisi
+
+```
+master NORTH<k>  ->  ustteki tile'in slave SOUTH_<k>
+master SOUTH<k>  ->  alttaki tile'in slave NORTH_<k>
+master EAST<k>   ->  sagdaki tile'in slave WEST_<k>
+master WEST<k>   ->  soldaki tile'in slave EAST_<k>
+```
+
+Port sayilari bu eslemeyi dogruluyor: compute tile'in 6 NORTH master portu
+var, ustundeki tile'in 6 SOUTH slave portu; 4 SOUTH master, alttakinin
+4 NORTH slave portu. Shim'in 6 NORTH master'i memory tile'in 6 SOUTH
+slave'ine, memory tile'in 4 SOUTH master'i shim'in 4 NORTH slave'ine
+denk geliyor.
+
+### Shim DMA baglantisi
+
+Shim'in kendi stream switch'inde DMA portu yok; DMA guney portlarindan
+gecer ve MUX/DEMUX registerlari bu portlarin NoC/DMA/PL'den hangisine
+bagli oldugunu secer (`xaie_plif.c`):
+
+| Yon | Port | Register |
+| --- | --- | --- |
+| host -> AIE (MM2S) | slave SOUTH 3 veya 7 | MUX_CONFIG (0x1F000), alanlar SOUTH2@8, SOUTH3@10, SOUTH6@12, SOUTH7@14 |
+| AIE -> host (S2MM) | master SOUTH 2 veya 3 | DEMUX_CONFIG (0x1F004), alanlar SOUTH2@4, SOUTH3@6, SOUTH4@8, SOUTH5@10 |
+
+Alan degerleri: 0 = PL, 1 = DMA, 2 = NOC.
+
+**Cikarim (dogrulanmadi):** kanal <-> port eslemesi sirayla varsayildi
+(MM2S ch0 -> SOUTH_3, ch1 -> SOUTH_7; S2MM ch0 -> SOUTH2, ch1 -> SOUTH3).
+Gercek donanimla karsilastirilmali.
+
+### Kalan
+
+Paket anahtarlamali (packet-switched) akis, slot/arbitrasyon registerlari ve
+trace portlari modellenmedi. Compute tile'in CORE stream portlari da yok --
+AIE interpreter olmadigi icin veri gidecek yer yok; bu porta ulasan veri
+sessizce yutulmuyor, uyari veriliyor.
 
 ## 7. ctrlcode bicimi
 

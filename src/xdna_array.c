@@ -251,10 +251,19 @@ static uint32_t bits(uint32_t word, uint32_t lsb, uint32_t width)
 
 static void tile_free_mem(AieTile *t)
 {
+    uint32_t i;
+
     free(t->data);
     free(t->prog);
     t->data = NULL;
     t->prog = NULL;
+    for (i = 0; i < AIE_MAX_DMA_CH; i++) {
+        free(t->in_fifo[i].buf);
+        t->in_fifo[i].buf = NULL;
+        t->in_fifo[i].cap = 0;
+        t->in_fifo[i].len = 0;
+        t->in_fifo[i].rd = 0;
+    }
     regmap_free(&t->regs);
 }
 
@@ -315,15 +324,13 @@ void xdna_array_free(XdnaArray *arr)
             tile_free_mem(&arr->tile[col][row]);
         }
     }
-    for (col = 0; col < AIE_NUM_COLS; col++) {
-        free(arr->stream[col].buf);
-    }
     free(arr);
 }
 
 void xdna_array_reset(XdnaArray *arr)
 {
     uint8_t col, row;
+    uint32_t i;
 
     for (col = 0; col < AIE_NUM_COLS; col++) {
         for (row = 0; row < AIE_NUM_ROWS; row++) {
@@ -341,32 +348,150 @@ void xdna_array_reset(XdnaArray *arr)
             memset(t->ch_queue, 0, sizeof(t->ch_queue));
             t->core_ctrl = 0;
             t->core_status = 0;
+            memset(t->ss_master, 0, sizeof(t->ss_master));
+            memset(t->ss_slave, 0, sizeof(t->ss_slave));
+            t->shim_mux = 0;
+            t->shim_demux = 0;
+            for (i = 0; i < AIE_MAX_DMA_CH; i++) {
+                t->in_fifo[i].len = 0;
+                t->in_fifo[i].rd = 0;
+            }
             regmap_free(&t->regs);
         }
-        arr->stream[col].len = 0;
-        arr->stream[col].rd = 0;
     }
     memset(&arr->stats, 0, sizeof(arr->stats));
 }
 
 /* ---------------------------------------------------------------- */
-/* Kolon stream FIFO'su                                              */
+/* Stream switch                                                     */
 /* ---------------------------------------------------------------- */
 /*
- * BASITLESTIRME: gercek donanimda tile'lar arasi veri, stream switch
- * uzerinden yonlendirilen paketlerle akiyor. Stream switch konfigurasyon
- * registerlarinin tam yerlesimi henuz modellenmedi; bu yuzden her kolon
- * icin tek bir FIFO kullaniyoruz. MM2S yazar, S2MM okur.
- *
- * Bu, tek yollu (kolon ici) veri hareketini dogru modelliyor; coklu
- * paket akisi ve kolonlar arasi yonlendirme icin stream switch modeli
- * gerekiyor (yol haritasi asama 6).
+ * Port tablolari xaiemlgbl_params.h icindeki register siralamasindan
+ * cikarildi (offset sirasi = port indeksi). Master CONFIGURATION alani
+ * bu indeks uzayindaki bir SLAVE portu gosterir.
  */
 
-static int stream_push(XdnaArray *arr, uint8_t col, const void *src, uint32_t len)
-{
-    AieStream *s = &arr->stream[col];
+#define P(c, i) { AIE_PC_##c, (i) }
 
+static const AiePortDesc core_master_ports[] = {
+    P(CORE, 0), P(DMA, 0), P(DMA, 1), P(CTRL, 0), P(FIFO, 0),
+    P(SOUTH, 0), P(SOUTH, 1), P(SOUTH, 2), P(SOUTH, 3),
+    P(WEST, 0), P(WEST, 1), P(WEST, 2), P(WEST, 3),
+    P(NORTH, 0), P(NORTH, 1), P(NORTH, 2), P(NORTH, 3), P(NORTH, 4), P(NORTH, 5),
+    P(EAST, 0), P(EAST, 1), P(EAST, 2), P(EAST, 3),
+};
+
+static const AiePortDesc core_slave_ports[] = {
+    P(CORE, 0), P(DMA, 0), P(DMA, 1), P(CTRL, 0), P(FIFO, 0),
+    P(SOUTH, 0), P(SOUTH, 1), P(SOUTH, 2), P(SOUTH, 3), P(SOUTH, 4), P(SOUTH, 5),
+    P(WEST, 0), P(WEST, 1), P(WEST, 2), P(WEST, 3),
+    P(NORTH, 0), P(NORTH, 1), P(NORTH, 2), P(NORTH, 3),
+    P(EAST, 0), P(EAST, 1), P(EAST, 2), P(EAST, 3),
+    P(TRACE, 0), P(TRACE, 1),
+};
+
+static const AiePortDesc memt_master_ports[] = {
+    P(DMA, 0), P(DMA, 1), P(DMA, 2), P(DMA, 3), P(DMA, 4), P(DMA, 5),
+    P(CTRL, 0),
+    P(SOUTH, 0), P(SOUTH, 1), P(SOUTH, 2), P(SOUTH, 3),
+    P(NORTH, 0), P(NORTH, 1), P(NORTH, 2), P(NORTH, 3), P(NORTH, 4), P(NORTH, 5),
+};
+
+static const AiePortDesc memt_slave_ports[] = {
+    P(DMA, 0), P(DMA, 1), P(DMA, 2), P(DMA, 3), P(DMA, 4), P(DMA, 5),
+    P(CTRL, 0),
+    P(SOUTH, 0), P(SOUTH, 1), P(SOUTH, 2), P(SOUTH, 3), P(SOUTH, 4), P(SOUTH, 5),
+    P(NORTH, 0), P(NORTH, 1), P(NORTH, 2), P(NORTH, 3),
+    P(TRACE, 0),
+};
+
+static const AiePortDesc shim_master_ports[] = {
+    P(CTRL, 0), P(FIFO, 0),
+    P(SOUTH, 0), P(SOUTH, 1), P(SOUTH, 2), P(SOUTH, 3), P(SOUTH, 4), P(SOUTH, 5),
+    P(WEST, 0), P(WEST, 1), P(WEST, 2), P(WEST, 3),
+    P(NORTH, 0), P(NORTH, 1), P(NORTH, 2), P(NORTH, 3), P(NORTH, 4), P(NORTH, 5),
+    P(EAST, 0), P(EAST, 1), P(EAST, 2), P(EAST, 3),
+};
+
+static const AiePortDesc shim_slave_ports[] = {
+    P(CTRL, 0), P(FIFO, 0),
+    P(SOUTH, 0), P(SOUTH, 1), P(SOUTH, 2), P(SOUTH, 3),
+    P(SOUTH, 4), P(SOUTH, 5), P(SOUTH, 6), P(SOUTH, 7),
+    P(WEST, 0), P(WEST, 1), P(WEST, 2), P(WEST, 3),
+    P(NORTH, 0), P(NORTH, 1), P(NORTH, 2), P(NORTH, 3),
+    P(EAST, 0), P(EAST, 1), P(EAST, 2), P(EAST, 3),
+    P(TRACE, 0),
+};
+
+#undef P
+
+static const AiePortDesc *master_ports(AieTileKind kind, uint32_t *n)
+{
+    switch (kind) {
+    case AIE_TILE_MEM:
+        *n = (uint32_t)(sizeof(memt_master_ports) / sizeof(AiePortDesc));
+        return memt_master_ports;
+    case AIE_TILE_SHIM:
+        *n = (uint32_t)(sizeof(shim_master_ports) / sizeof(AiePortDesc));
+        return shim_master_ports;
+    default:
+        *n = (uint32_t)(sizeof(core_master_ports) / sizeof(AiePortDesc));
+        return core_master_ports;
+    }
+}
+
+static const AiePortDesc *slave_ports(AieTileKind kind, uint32_t *n)
+{
+    switch (kind) {
+    case AIE_TILE_MEM:
+        *n = (uint32_t)(sizeof(memt_slave_ports) / sizeof(AiePortDesc));
+        return memt_slave_ports;
+    case AIE_TILE_SHIM:
+        *n = (uint32_t)(sizeof(shim_slave_ports) / sizeof(AiePortDesc));
+        return shim_slave_ports;
+    default:
+        *n = (uint32_t)(sizeof(core_slave_ports) / sizeof(AiePortDesc));
+        return core_slave_ports;
+    }
+}
+
+static int find_port(const AiePortDesc *tab, uint32_t n, AiePortClass cls,
+                     uint32_t idx)
+{
+    uint32_t i;
+
+    for (i = 0; i < n; i++) {
+        if (tab[i].cls == cls && tab[i].idx == idx) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static int slave_port_of(AieTileKind kind, AiePortClass cls, uint32_t idx)
+{
+    uint32_t n;
+    const AiePortDesc *tab = slave_ports(kind, &n);
+
+    return find_port(tab, n, cls, idx);
+}
+
+static uint32_t tile_ss_master_base(const AieTile *t)
+{
+    return (t->kind == AIE_TILE_MEM) ? AIEML_MEMT_SS_MASTER
+                                     : AIEML_CORE_SS_MASTER;
+}
+
+static uint32_t tile_ss_slave_base(const AieTile *t)
+{
+    return (t->kind == AIE_TILE_MEM) ? AIEML_MEMT_SS_SLAVE
+                                     : AIEML_CORE_SS_SLAVE;
+}
+
+/* ---------------------------------------------------------------- */
+
+static int stream_push(AieStream *s, const void *src, uint32_t len)
+{
     if (s->len + len > s->cap) {
         size_t ncap = s->cap ? s->cap * 2u : 4096u;
         uint8_t *nbuf;
@@ -386,10 +511,8 @@ static int stream_push(XdnaArray *arr, uint8_t col, const void *src, uint32_t le
     return 0;
 }
 
-static int stream_pop(XdnaArray *arr, uint8_t col, void *dst, uint32_t len)
+static int stream_pop(AieStream *s, void *dst, uint32_t len)
 {
-    AieStream *s = &arr->stream[col];
-
     if (s->len - s->rd < len) {
         return -1;
     }
@@ -400,6 +523,189 @@ static int stream_pop(XdnaArray *arr, uint8_t col, void *dst, uint32_t len)
         s->len = 0;
     }
     return 0;
+}
+
+#define SS_MAX_DEPTH 32
+
+static void ss_inject(XdnaArray *arr, int col, int row, int slave_port,
+                      const uint8_t *data, uint32_t len, int depth);
+
+/* Bir master porta ulasan veriyi hedefine tasi. */
+static void ss_deliver(XdnaArray *arr, AieTile *t, uint32_t master_port,
+                       const uint8_t *data, uint32_t len, int depth)
+{
+    uint32_t n;
+    const AiePortDesc *tab = master_ports(t->kind, &n);
+    AiePortDesc p;
+
+    if (master_port >= n) {
+        return;
+    }
+    p = tab[master_port];
+
+    switch (p.cls) {
+    case AIE_PC_DMA:
+        /* Tile DMA S2MM kanalinin giris FIFO'su */
+        if (p.idx < tile_num_dma_ch(t)) {
+            if (stream_push(&t->in_fifo[p.idx], data, len) != 0) {
+                arr->stats.stream_drops++;
+            }
+        }
+        return;
+
+    case AIE_PC_SOUTH:
+        if (t->row == AIE_SHIM_ROW) {
+            /*
+             * Shim'in guneyi NoC/PL tarafi. DEMUX bu portu DMA'ya
+             * yonlendirmisse shim S2MM kanalinin FIFO'suna dusuyor.
+             */
+            uint32_t ch;
+
+            for (ch = 0; ch < AIE_SHIM_DMA_NUM_CH; ch++) {
+                if (AIE_SHIM_S2MM_SOUTH_PORT(ch) != p.idx) {
+                    continue;
+                }
+                /* DEMUX alanlari: SOUTH2@4, SOUTH3@6, SOUTH4@8, SOUTH5@10 */
+                if (p.idx < 2u ||
+                    ((t->shim_demux >> (4u + 2u * (p.idx - 2u))) & 0x3u) !=
+                        AIE_MUX_TYPE_DMA) {
+                    xdna_log(arr->npu, XDNA_LOG_WARN,
+                             "stream: shim(%u) SOUTH%u DEMUX DMA'ya ayarli degil",
+                             t->col, p.idx);
+                    arr->stats.stream_drops++;
+                    return;
+                }
+                if (stream_push(&t->in_fifo[ch], data, len) != 0) {
+                    arr->stats.stream_drops++;
+                }
+                return;
+            }
+            arr->stats.stream_drops++;
+            return;
+        }
+        ss_inject(arr, t->col, t->row - 1,
+                  slave_port_of(tile_kind_for_row((uint8_t)(t->row - 1)),
+                                AIE_PC_NORTH, p.idx),
+                  data, len, depth + 1);
+        return;
+
+    case AIE_PC_NORTH:
+        ss_inject(arr, t->col, t->row + 1,
+                  slave_port_of(tile_kind_for_row((uint8_t)(t->row + 1)),
+                                AIE_PC_SOUTH, p.idx),
+                  data, len, depth + 1);
+        return;
+
+    case AIE_PC_EAST:
+        ss_inject(arr, t->col + 1, t->row,
+                  slave_port_of(t->kind, AIE_PC_WEST, p.idx), data, len,
+                  depth + 1);
+        return;
+
+    case AIE_PC_WEST:
+        ss_inject(arr, t->col - 1, t->row,
+                  slave_port_of(t->kind, AIE_PC_EAST, p.idx), data, len,
+                  depth + 1);
+        return;
+
+    default:
+        /*
+         * Compute tile stream girisi, tile control ve trace portlari
+         * modellenmedi (AIE interpreter yok). Veriyi sessizce yutmuyoruz.
+         */
+        xdna_log(arr->npu, XDNA_LOG_WARN,
+                 "stream: tile(%u,%u) master port sinifi %u modellenmedi",
+                 t->col, t->row, p.cls);
+        arr->stats.stream_drops++;
+        return;
+    }
+}
+
+/* Veriyi bir tile'in slave portuna sok ve switch uzerinden dagit. */
+static void ss_inject(XdnaArray *arr, int col, int row, int slave_port,
+                      const uint8_t *data, uint32_t len, int depth)
+{
+    AieTile *t;
+    uint32_t n, m, nmaster;
+    const AiePortDesc *mtab;
+    bool delivered = false;
+
+    if (depth > SS_MAX_DEPTH) {
+        xdna_log(arr->npu, XDNA_LOG_ERROR, "stream: yonlendirme dongusu");
+        arr->stats.stream_drops++;
+        return;
+    }
+    if (col < 0 || row < 0 || slave_port < 0) {
+        arr->stats.stream_drops++;
+        return;
+    }
+    t = xdna_array_tile(arr, (uint8_t)col, (uint8_t)row);
+    if (!t) {
+        arr->stats.stream_drops++;
+        return;
+    }
+
+    (void)slave_ports(t->kind, &n);
+    if ((uint32_t)slave_port >= n) {
+        arr->stats.stream_drops++;
+        return;
+    }
+    if (!(t->ss_slave[slave_port] & AIE_SS_SLAVE_ENABLE_MASK)) {
+        xdna_log(arr->npu, XDNA_LOG_WARN,
+                 "stream: tile(%u,%u) slave port %d etkin degil", t->col,
+                 t->row, slave_port);
+        arr->stats.stream_drops++;
+        return;
+    }
+
+    arr->stats.stream_hops++;
+    mtab = master_ports(t->kind, &nmaster);
+    (void)mtab;
+    for (m = 0; m < nmaster; m++) {
+        uint32_t cfg = t->ss_master[m];
+
+        if (!(cfg & AIE_SS_MASTER_ENABLE_MASK)) {
+            continue;
+        }
+        if ((cfg & AIE_SS_MASTER_CFG_MASK) != (uint32_t)slave_port) {
+            continue;
+        }
+        delivered = true;
+        ss_deliver(arr, t, m, data, len, depth);
+    }
+
+    if (!delivered) {
+        xdna_log(arr->npu, XDNA_LOG_WARN,
+                 "stream: tile(%u,%u) slave port %d icin master yok", t->col,
+                 t->row, slave_port);
+        arr->stats.stream_drops++;
+    }
+}
+
+/* MM2S verisini tile'in switch'ine sok. */
+static void ss_inject_from_dma(XdnaArray *arr, AieTile *t, uint32_t ch,
+                               const uint8_t *data, uint32_t len)
+{
+    int sp;
+
+    if (t->kind == AIE_TILE_SHIM) {
+        uint32_t port = AIE_SHIM_MM2S_SOUTH_PORT(ch);
+
+        /* MUX alanlari: SOUTH2@8, SOUTH3@10, SOUTH6@12, SOUTH7@14 */
+        uint32_t shift = (port == 3u) ? 10u : 14u;
+
+        if (((t->shim_mux >> shift) & 0x3u) != AIE_MUX_TYPE_DMA) {
+            xdna_log(arr->npu, XDNA_LOG_WARN,
+                     "stream: shim(%u) SOUTH%u MUX DMA'ya ayarli degil",
+                     t->col, port);
+            arr->stats.stream_drops++;
+            return;
+        }
+        sp = slave_port_of(t->kind, AIE_PC_SOUTH, port);
+    } else {
+        sp = slave_port_of(t->kind, AIE_PC_DMA, ch);
+    }
+    ss_inject(arr, t->col, t->row, sp, data, len, 0);
 }
 
 /* ---------------------------------------------------------------- */
@@ -523,7 +829,8 @@ static void bd_decode(const AieTile *t, uint32_t idx, AieBd *bd)
 
 #define DMA_CHUNK 4096u
 
-static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir)
+static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir,
+                           uint32_t ch)
 {
     XdnaNpu *npu = arr->npu;
     uint32_t remaining = bd->len_words * 4u;
@@ -552,14 +859,13 @@ static int dma_transfer_bd(XdnaArray *arr, AieTile *t, const AieBd *bd, int dir)
                 }
                 memcpy(chunk, t->data + addr, n);
             }
-            if (stream_push(arr, t->col, chunk, n) != 0) {
-                return -1;
-            }
+            ss_inject_from_dma(arr, t, ch, chunk, n);
         } else {
             /* Stream'den oku, bellege yaz. */
-            if (stream_pop(arr, t->col, chunk, n) != 0) {
+            if (stream_pop(&t->in_fifo[ch], chunk, n) != 0) {
                 xdna_log(npu, XDNA_LOG_ERROR,
-                         "DMA: kolon %u stream'inde yeterli veri yok", t->col);
+                         "DMA: tile(%u,%u) kanal %u giris FIFO'su bos",
+                         t->col, t->row, ch);
                 return -1;
             }
             if (t->kind == AIE_TILE_SHIM) {
@@ -627,7 +933,7 @@ static void dma_run_channel(XdnaArray *arr, AieTile *t, int dir, uint32_t ch)
                          t->col, t->row, cur, bd.acq_id, t->lock[bd.acq_id]);
                 return;
             }
-            if (dma_transfer_bd(arr, t, &bd, dir) != 0) {
+            if (dma_transfer_bd(arr, t, &bd, dir, ch) != 0) {
                 return;
             }
             if (bd.rel_val) {
@@ -740,6 +1046,31 @@ uint32_t xdna_array_read32(XdnaArray *arr, uint8_t col, uint8_t row,
         return is_queue ? t->ch_queue[dir][ch] : t->ch_ctrl[dir][ch];
     }
 
+    /* Stream switch */
+    {
+        uint32_t mbase = tile_ss_master_base(t);
+        uint32_t sbase = tile_ss_slave_base(t);
+        uint32_t nm, ns;
+
+        (void)master_ports(t->kind, &nm);
+        (void)slave_ports(t->kind, &ns);
+        if (off >= mbase && off < mbase + nm * 4u) {
+            return t->ss_master[(off - mbase) / 4u];
+        }
+        if (off >= sbase && off < sbase + ns * 4u) {
+            return t->ss_slave[(off - sbase) / 4u];
+        }
+    }
+
+    if (t->kind == AIE_TILE_SHIM) {
+        if (off == AIEML_SHIM_MUX_CONFIG) {
+            return t->shim_mux;
+        }
+        if (off == AIEML_SHIM_DEMUX_CONFIG) {
+            return t->shim_demux;
+        }
+    }
+
     if (t->kind == AIE_TILE_CORE) {
         if (off == AIEML_CORE_CONTROL) {
             return t->core_ctrl;
@@ -815,6 +1146,34 @@ void xdna_array_write32(XdnaArray *arr, uint8_t col, uint8_t row, uint32_t off,
             t->ch_ctrl[dir][ch] = val;
         }
         return;
+    }
+
+    {
+        uint32_t mbase = tile_ss_master_base(t);
+        uint32_t sbase = tile_ss_slave_base(t);
+        uint32_t nm, ns;
+
+        (void)master_ports(t->kind, &nm);
+        (void)slave_ports(t->kind, &ns);
+        if (off >= mbase && off < mbase + nm * 4u) {
+            t->ss_master[(off - mbase) / 4u] = val;
+            return;
+        }
+        if (off >= sbase && off < sbase + ns * 4u) {
+            t->ss_slave[(off - sbase) / 4u] = val;
+            return;
+        }
+    }
+
+    if (t->kind == AIE_TILE_SHIM) {
+        if (off == AIEML_SHIM_MUX_CONFIG) {
+            t->shim_mux = val;
+            return;
+        }
+        if (off == AIEML_SHIM_DEMUX_CONFIG) {
+            t->shim_demux = val;
+            return;
+        }
     }
 
     if (t->kind == AIE_TILE_CORE) {

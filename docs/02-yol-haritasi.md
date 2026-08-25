@@ -5,12 +5,12 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 
 | # | Asama | Durum |
 | --- | --- | --- |
-| 1 | PCI kabugu | QEMU aygiti yazildi, derlenmedi |
+| 1 | PCI kabugu | **derlendi ve dogrulandi** |
 | 2 | Surucu boot'u (PSP/SMU/firmware) | **cekirdek tamam, testli** |
 | 3 | Guest IOMMU: SVA/PASID | acik problem |
 | 4 | Yonetim firmware'i (MERT) | **temel mesajlar tamam, testli** |
 | 5 | Bellek modeli (BO, DMA, heap) | **tile bellegi + DMA tamam, testli** |
-| 6 | XDNA array mimari modeli | **tamam; stream switch eksik** |
+| 6 | XDNA array mimari modeli | **tamam, stream switch dahil** |
 | 7 | AIE instruction interpreter | baslanmadi (asil kalan is) |
 | 8 | ctrlcode motoru | **tamam, testli** |
 | 9 | Uctan uca gercek workload | veri hareketi calisiyor; compute eksik |
@@ -25,8 +25,17 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 **Kabul:** guest icinde `lspci -nn` aygiti gosterir; `amdxdna` modulu
 `probe`'a girer.
 
-**Durum:** `qemu/hw/misc/xdna_npu.c` yazildi. Bu depoda QEMU agaci
-olmadigindan **derlenmedi**; `qemu/README.md`'deki adimlarla derlenmeli.
+**Durum:** QEMU master agacinda derlendi ve calistirildi. `-device xdna-npu`
+ile ornekleniyor; `info pci` ciktisi:
+
+```
+class Class 1200, addr 00:01.0, pci id 1022:1502
+bar 0: mem [0x7fffe]   bar 2: mem [0x3fffe]   bar 4: mem [0xfffe]
+```
+
+PCI kimligi, sinif kodu ve uc 64-bit BAR tasarlandigi gibi. Guest icinde
+`lspci`/`modprobe amdxdna` ile dogrulama henuz yapilmadi -- bunun icin
+`CONFIG_DRM_ACCEL_AMDXDNA` etkin bir kernel gerekiyor.
 
 ## 2. Surucu boot'u
 
@@ -110,12 +119,13 @@ bellegi, durum, lock'lar, giris/cikis stream'leri.
 **Kabul:** `QUERY_COL_STATUS` gercek array durumundan anlamli bir dokum
 uretir (su an sifir dokuyor).
 
-**Durum:** 20 compute tile, 5 memory tile, 5 shim; lock'lar, BD'ler ve DMA
-motorlari `aie-rt`'den dogrulanmis register haritasiyla modellendi.
+**Durum:** 20 compute tile, 5 memory tile, 5 shim; lock'lar, BD'ler, DMA
+motorlari ve **stream switch** `aie-rt`'den dogrulanmis register haritasiyla
+modellendi. Devre anahtarlamali yonlendirme, mesh komsu baglantilari
+(NORTH<->SOUTH, EAST<->WEST) ve shim MUX/DEMUX dahil.
 Ayrintilar: `docs/04-array-ve-ctrlcode.md`.
 
-Kalan: **stream switch yonlendirmesi**. Su an kolon basina tek FIFO var --
-kolon ici tek yollu akis dogru, kolonlar arasi yonlendirme yok.
+Kalan: paket anahtarlamali (packet-switched) akis ve trace portlari.
 
 ## 7. AIE instruction interpreter
 

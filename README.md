@@ -20,7 +20,7 @@ src/              QEMU'dan bagimsiz emulator cekirdegi
   xdna_fw.c         firmware boot el sikismasi
   xdna_mailbox.c    mailbox ring buffer protokolu (cihaz tarafi)
   xdna_mert.c       yonetim firmware'i (MERT) mesaj isleyicisi
-  xdna_array.c      XDNA array: tile'lar, lock'lar, BD'ler, DMA motorlari
+  xdna_array.c      XDNA array: tile'lar, lock'lar, BD'ler, DMA, stream switch
   xdna_txn.c        ctrlcode (XAie transaction) yorumlayicisi
 tests/            surucu davranisini taklit eden kosumlar
 qemu/             QEMU PCI aygiti sarmalayicisi
@@ -56,12 +56,12 @@ Her iki testin kodu da emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 
 | Asama | Durum |
 | --- | --- |
-| 1. PCI kabugu | QEMU aygiti yazildi, **derlenmedi** (bu depoda QEMU agaci yok) |
+| 1. PCI kabugu | **QEMU'da derlendi ve dogrulandi** |
 | 2. Surucu boot'u | cekirdek tamam, testli |
 | 3. Guest IOMMU (SVA/PASID) | plan var, bkz. acik sorular |
 | 4. Yonetim firmware'i (MERT) | temel mesajlar tamam, testli |
 | 5. Bellek modeli / DMA | tile bellegi + DMA tamam, testli |
-| 6. XDNA array modeli | tamam; stream switch eksik |
+| 6. XDNA array modeli | tamam, stream switch dahil |
 | 7. AIE instruction interpreter | **baslanmadi -- kalan asil is** |
 | 8. ctrlcode motoru | tamam, testli |
 | 9. Uctan uca workload | veri hareketi calisiyor; compute eksik |

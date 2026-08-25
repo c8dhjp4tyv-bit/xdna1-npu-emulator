@@ -13,10 +13,9 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/module.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/msix.h"
-#include "hw/qdev-properties.h"
-#include "migration/vmstate.h"
 #include "qom/object.h"
 
 #include "xdna/xdna_emu.h"
@@ -83,7 +82,7 @@ static void xdna_host_log(void *opaque, int level, const char *msg)
     if (level <= XDNA_LOG_WARN) {
         qemu_log_mask(LOG_GUEST_ERROR, "xdna-npu: %s\n", msg);
     } else {
-        qemu_log_mask(LOG_TRACE, "xdna-npu: %s\n", msg);
+        qemu_log_mask(LOG_UNIMP, "xdna-npu: %s\n", msg);
     }
 }
 
@@ -209,7 +208,7 @@ static void xdna_npu_exit(PCIDevice *pdev)
     s->emu = NULL;
 }
 
-static void xdna_npu_class_init(ObjectClass *klass, void *data)
+static void xdna_npu_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);

@@ -168,6 +168,68 @@ static uint32_t memt_bd(uint32_t bd, uint32_t word)
     return AIEML_MEMT_DMA_BD0 + bd * AIE_BD_STRIDE + word * 4u;
 }
 
+/*
+ * Stream switch port indeksleri -- aie-rt register siralamasindan
+ * (offset sirasi = port indeksi):
+ *
+ *   shim slave : TILE_CTRL, FIFO_0, SOUTH_0..7, WEST_0..3, NORTH_0..3,
+ *                EAST_0..3, TRACE
+ *   shim master: TILE_CTRL, FIFO0, SOUTH0..5, WEST0..3, NORTH0..5, EAST0..3
+ *   memt slave : DMA_0..5, TILE_CTRL, SOUTH_0..5, NORTH_0..3, TRACE
+ *   memt master: DMA0..5, TILE_CTRL, SOUTH0..3, NORTH0..5
+ */
+#define SHIM_SLAVE_SOUTH(n)   (2u + (n))
+#define SHIM_SLAVE_NORTH(n)   (14u + (n))
+#define SHIM_MASTER_SOUTH(n)  (2u + (n))
+#define SHIM_MASTER_NORTH(n)  (12u + (n))
+#define MEMT_SLAVE_DMA(n)     (0u + (n))
+#define MEMT_SLAVE_SOUTH(n)   (7u + (n))
+#define MEMT_MASTER_DMA(n)    (0u + (n))
+#define MEMT_MASTER_SOUTH(n)  (7u + (n))
+
+#define SS_MASTER(base, port)  ((base) + (port) * 4u)
+#define SS_ENABLE(slave_port) \
+    (AIE_SS_MASTER_ENABLE_MASK | ((slave_port) & AIE_SS_MASTER_CFG_MASK))
+
+/*
+ * Yonlendirmeyi kur:
+ *
+ *   host -> shim MM2S ch0 -> shim slave SOUTH_3 -> shim master NORTH0
+ *        -> memtile slave SOUTH_0 -> memtile master DMA0 (S2MM ch0)
+ *
+ *   memtile MM2S ch0 -> memtile slave DMA_0 -> memtile master SOUTH0
+ *        -> shim slave NORTH_0 -> shim master SOUTH2 (S2MM ch0) -> host
+ *
+ * Gercek ctrlcode da bu registerlari boyle programliyor; stream switch
+ * konfigure edilmezse veri hicbir yere gitmez.
+ */
+static void txn_config_stream_switch(TxnBuild *b)
+{
+    /* --- host -> array --- */
+    /* shim MUX: SOUTH3 alani (LSB 10) DMA'ya baglansin */
+    txn_w32(b, 0, 0, AIEML_SHIM_MUX_CONFIG, AIE_MUX_TYPE_DMA << 10);
+    txn_w32(b, 0, 0, SS_MASTER(AIEML_SHIM_SS_SLAVE, SHIM_SLAVE_SOUTH(3)),
+            AIE_SS_SLAVE_ENABLE_MASK);
+    txn_w32(b, 0, 0, SS_MASTER(AIEML_SHIM_SS_MASTER, SHIM_MASTER_NORTH(0)),
+            SS_ENABLE(SHIM_SLAVE_SOUTH(3)));
+    txn_w32(b, 0, 1, SS_MASTER(AIEML_MEMT_SS_SLAVE, MEMT_SLAVE_SOUTH(0)),
+            AIE_SS_SLAVE_ENABLE_MASK);
+    txn_w32(b, 0, 1, SS_MASTER(AIEML_MEMT_SS_MASTER, MEMT_MASTER_DMA(0)),
+            SS_ENABLE(MEMT_SLAVE_SOUTH(0)));
+
+    /* --- array -> host --- */
+    txn_w32(b, 0, 1, SS_MASTER(AIEML_MEMT_SS_SLAVE, MEMT_SLAVE_DMA(0)),
+            AIE_SS_SLAVE_ENABLE_MASK);
+    txn_w32(b, 0, 1, SS_MASTER(AIEML_MEMT_SS_MASTER, MEMT_MASTER_SOUTH(0)),
+            SS_ENABLE(MEMT_SLAVE_DMA(0)));
+    txn_w32(b, 0, 0, SS_MASTER(AIEML_SHIM_SS_SLAVE, SHIM_SLAVE_NORTH(0)),
+            AIE_SS_SLAVE_ENABLE_MASK);
+    txn_w32(b, 0, 0, SS_MASTER(AIEML_SHIM_SS_MASTER, SHIM_MASTER_SOUTH(2)),
+            SS_ENABLE(SHIM_SLAVE_NORTH(0)));
+    /* shim DEMUX: SOUTH2 alani (LSB 4) DMA'ya baglansin */
+    txn_w32(b, 0, 0, AIEML_SHIM_DEMUX_CONFIG, AIE_MUX_TYPE_DMA << 4);
+}
+
 /* host -> memory tile -> host yolunu kuran ctrlcode. */
 static uint32_t build_loopback_ctrlcode(uint8_t *buf, uint64_t in_addr,
                                         uint64_t out_addr)
@@ -175,8 +237,9 @@ static uint32_t build_loopback_ctrlcode(uint8_t *buf, uint64_t in_addr,
     TxnBuild b;
 
     txn_init(&b, buf);
+    txn_config_stream_switch(&b);
 
-    /* --- shim MM2S: host girisini kolon stream'ine bas --- */
+    /* --- shim MM2S: host girisini stream switch'e bas --- */
     txn_w32(&b, 0, 0, shim_bd(0, AIE_SHIM_BD_LEN_WORD), XFER_WORDS);
     txn_w32(&b, 0, 0, shim_bd(0, AIE_SHIM_BD_ADDRLO_WORD),
             (uint32_t)in_addr & AIE_SHIM_BD_ADDRLO_MASK);
@@ -328,9 +391,10 @@ static void test_exec(Host *host, XdnaNpu *npu)
             pattern[i] = 0xC0DE0000u + i;
         }
         txn_init(&b, cc2);
+        txn_config_stream_switch(&b);
         /* Bellege dogrudan blok yazma (byte offseti = kelime offseti * 4) */
         txn_blockwrite(&b, 0, 1, MEMT_WORD_OFF * 4u, pattern, XFER_WORDS);
-        /* memory tile MM2S -> stream (lock kullanmadan) */
+        /* memory tile MM2S -> stream switch (lock kullanmadan) */
         txn_w32(&b, 0, 1, memt_bd(2, AIE_MEMT_BD_LEN_WORD), XFER_WORDS);
         txn_w32(&b, 0, 1, memt_bd(2, AIE_MEMT_BD_ADDR_WORD), MEMT_WORD_OFF);
         txn_w32(&b, 0, 1, memt_bd(2, AIE_MEMT_BD_CTRL_WORD),

@@ -201,6 +201,57 @@
 /* Lock deger alanlari her yerde 7 bit isaretli. */
 #define AIE_BD_LOCK_VAL_WIDTH       7u
 
+/* ------------------------------------------------------------------ */
+/* Stream switch -- xaiemlgbl_params.h + xaie_plif.c                    */
+/* ------------------------------------------------------------------ */
+/*
+ * Devre anahtarlamali (circuit-switched) yonlendirme:
+ *   MASTER_CONFIG[m].CONFIGURATION = bu master portu besleyen slave port
+ *   MASTER_CONFIG[m].MASTER_ENABLE = baglanti etkin mi
+ *   SLAVE_CONFIG[s].SLAVE_ENABLE   = slave port etkin mi
+ *
+ * Komsu baglantisi (mesh): master NORTH<k> -> ustteki tile'in slave
+ * SOUTH_<k> portu; SOUTH -> alttakinin NORTH'u; EAST -> sagdakinin WEST'i;
+ * WEST -> soldakinin EAST'i. Port sayilari bu eslemeyi dogruluyor
+ * (orn. compute tile 6 NORTH master, ustteki tile 6 SOUTH slave).
+ */
+#define AIEML_CORE_SS_MASTER        0x0003F000u
+#define AIEML_CORE_SS_SLAVE         0x0003F100u
+#define AIEML_MEMT_SS_MASTER        0x000B0000u
+#define AIEML_MEMT_SS_SLAVE         0x000B0100u
+#define AIEML_SHIM_SS_MASTER        0x0003F000u
+#define AIEML_SHIM_SS_SLAVE         0x0003F100u
+
+#define AIE_SS_MASTER_ENABLE_MASK   0x80000000u
+#define AIE_SS_MASTER_PACKET_MASK   0x40000000u
+#define AIE_SS_MASTER_CFG_MASK      0x0000007Fu
+#define AIE_SS_SLAVE_ENABLE_MASK    0x80000000u
+#define AIE_SS_SLAVE_PACKET_MASK    0x40000000u
+
+#define AIE_SS_MAX_PORTS            25u
+
+/*
+ * Shim MUX/DEMUX: shim'in guney portlarinin NoC/DMA/PL'den hangisine
+ * bagli oldugunu secer. 2 bit alanlar.
+ *   MUX   (slave tarafi):  SOUTH2@8, SOUTH3@10, SOUTH6@12, SOUTH7@14
+ *   DEMUX (master tarafi): SOUTH2@4, SOUTH3@6,  SOUTH4@8,  SOUTH5@10
+ */
+#define AIEML_SHIM_MUX_CONFIG       0x0001F000u
+#define AIEML_SHIM_DEMUX_CONFIG     0x0001F004u
+#define AIE_MUX_TYPE_PL             0u
+#define AIE_MUX_TYPE_DMA            1u
+#define AIE_MUX_TYPE_NOC            2u
+
+/*
+ * Shim DMA'nin stream switch portlari -- xaie_plif.c:
+ *   XAie_EnableShimDmaToAieStrmPort  : slave SOUTH port 3 veya 7 (host -> AIE)
+ *   XAie_EnableAieToShimDmaStrmPort  : master SOUTH port 2 veya 3 (AIE -> host)
+ * Kanal <-> port eslemesi (ch0 -> ilk port) SIRALAMADAN CIKARIM;
+ * gercek donanimla dogrulanmali.
+ */
+#define AIE_SHIM_MM2S_SOUTH_PORT(ch) ((ch) == 0 ? 3u : 7u)
+#define AIE_SHIM_S2MM_SOUTH_PORT(ch) ((ch) == 0 ? 2u : 3u)
+
 /* Task/start queue */
 #define AIE_DMA_QUEUE_START_BD_MASK 0x0000000Fu
 #define AIE_DMA_QUEUE_REPEAT_LSB    16u
