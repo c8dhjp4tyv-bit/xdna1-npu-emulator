@@ -187,6 +187,29 @@ bitlerindeki onek koduyla belirtiliyor. Kodlama `Xilinx/llvm-aie`
 Tam bir onek kodu; bosluk yok. `xdna_aie2_packet_size()` disariya acik ve
 `tests/test_core.c` tum bit desenlerini tek tek dogruluyor.
 
+**Bu tablo tahmin degil, olculdu.** `llvm-aie` derlenip `aie2` hedefli
+disassembler'i **altin standart** olarak kullanildi: her dusuk-nibble
+deseni icin gercek bir paket bulundu ve ayni paket 3 kez tekrarlanip
+llvm'in TAM OLARAK 3 instruction uretmesi dogrulandi. Boyut yanlis
+olsaydi llvm farkli sayida instruction uretir veya gecersiz kodlama
+hatasi verirdi. **16 desenin 16'si da uyustu.**
+
+Ornek cikti:
+
+```
+0x01 0x00                    -> nop                          (2 bayt)
+0x03 x8                      -> nops ; vadd.8 x0, x0, x0     (8 bayt)
+0x0b 0xc8 0xcb ... (10 bayt) -> lda r31, [sp, #6212]         (10 bayt)
+0x00 x16                     -> nopb ; nopa ; nops ; nopxm ;
+                                vmac cm0, cm0, x0, x0, r0    (16 bayt)
+```
+
+Son satir 128 bitlik bundle'in **bes slot** tasidigini gosteriyor
+(b / a / s / xm / vektor), yani slot cozumunun hedefi bu.
+
+Uretilen altin vektorler `tests/aie2_vectors.h` icinde ve test paketi
+bunlara karsi kosuyor; uretici betik `tools/gen-aie2-vectors.py`.
+
 `CORE_CONTROL` enable artik gercekten calisiyor: emulator program
 bellegini getiriyor, paketi dogru siniriyor ve slot'lari
 calistiramadigi icin **ERROR_HALT** ile duruyor. `CORE_PC`, `CORE_SP`,
@@ -199,10 +222,16 @@ PC'de, hangi boyutta bir paketle karsilastigimiz raporlaniyor.
 
 **Kalan:** slot cozumu ve semantik. VLIW paketi icindeki alu / lda / st /
 mv slot'larinin kodlamalari `llvm-aie` TableGen'inde tam olarak var
-(`AIE2GenInstrFormats.td`, her instruction sinifi icin bit atamalari),
-ama bunlari koda donusturmek ya bir TableGen degerlendirici ya da
-`llvm-aie`'nin kendisini derleyip disassembler'ini altin standart olarak
-kullanmayi gerektiriyor.
+(`AIE2GenInstrFormats.td`, her instruction sinifi icin bit atamalari).
+
+Artik elimizde calisan bir altin standart var (`llvm-mc -triple=aie2`),
+yani slot cozucusu **differential test ile** gelistirilebilir: bizim
+cozumumuzu llvm'in ciktisiyla karsilastir. Bu, ISA alt kumesini
+dogrulanabilir sekilde implemente etmenin saglam yolu.
+
+Ama net olmak gerekirse: tam AIE2 vektor semantigi (saturasyon,
+yuvarlama modlari, akumulator genisligi, permute agi) hala aylar
+mertebesinde bir is. Bu asamada altyapisi kuruldu, kendisi degil.
 
 ## 8. ctrlcode motoru
 

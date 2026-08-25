@@ -23,6 +23,8 @@ src/              QEMU'dan bagimsiz emulator cekirdegi
   xdna_array.c      XDNA array: tile'lar, lock'lar, BD'ler, DMA, stream switch
   xdna_txn.c        ctrlcode (XAie transaction) yorumlayicisi
 tests/            surucu davranisini taklit eden kosumlar
+                    aie2_vectors.h  llvm-aie ile uretilmis altin vektorler
+tools/            gen-aie2-vectors.py -- altin vektor ureticisi
 qemu/             QEMU PCI aygiti sarmalayicisi
 docs/             hedef, dogrulanmis donanim arayuzu, yol haritasi, acik sorular
 ```

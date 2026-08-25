@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "drv_model.h"
+#include "aie2_vectors.h"
 
 #define CTRLCODE_ADDR (HOST_MEM_BASE + 0x300000)
 
@@ -71,6 +72,25 @@ static void test_packet_sizes(void)
 
         CHECK(xdna_aie2_packet_size(hi) == xdna_aie2_packet_size(n),
               "ust bitler 0x%08x sonucu degistirdi", hi);
+    }
+
+    step("Paket uzunlugu: llvm-aie disassembler'i ile uretilmis altin vektorler");
+    {
+        size_t i;
+
+        CHECK_EQ(AIE2_VECTOR_COUNT, 16u, "altin vektor sayisi");
+        for (i = 0; i < AIE2_VECTOR_COUNT; i++) {
+            const Aie2Vector *v = &aie2_vectors[i];
+            uint32_t word = 0;
+            uint32_t n = v->size < 4u ? v->size : 4u;
+            uint32_t got;
+
+            memcpy(&word, v->bytes, n);
+            got = xdna_aie2_packet_size(word);
+            CHECK(got == v->size,
+                  "vektor %u (%s): llvm %u bayt dedi, biz %u bulduk",
+                  (unsigned)i, v->disasm, v->size, got);
+        }
     }
 
     step("Paket uzunlugu: bilinen ornekler");
