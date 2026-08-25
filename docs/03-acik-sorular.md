@@ -116,17 +116,110 @@ yapilandirilmissa**. `create_ctx_req.pasid` o durumda 0 gonderiliyor
 kaynaklarda carveout'u npu1 yolu icin kuran bir cagri yok (aie4/SR-IOV
 tarafinda gorunuyor), dolayisiyla pratikte (a) daha gercekci.
 
+### DENEY SONUCLARI (gercek guest, QEMU master + Linux master)
+
+Bu bolum artik spekulasyon degil: emulator gercek bir guest'te stock
+`amdxdna` ile kosturuldu (`qemu/guest-test/`). Bulgular:
+
+**1. Probe geciyor, `/dev/accel/accel0` olusuyor.**
+
+```
+amdxdna 0000:00:03.0: [drm] Load firmware amdnpu/1502_00/npu.sbin
+[drm] Initialized amdxdna_accel_driver 0.10.0 for 0000:00:03.0 on minor 0
+/sys/class/accel/accel0/device/vbnv = RyzenAI-npu1
+/sys/class/accel/accel0/device/fw_version = 5.7.0.0
+```
+
+Yani SMU guc dizisi, PSP firmware yuklemesi, firmware el sikismasi,
+mailbox ve surum sorgulari **gercek surucuyle** calisiyor.
+
+**2. `open()` SVA'da takiliyor.**
+
+```
+amdxdna_sva_init: SVA bind device failed, ret -19
+amdxdna_drm_open: PASID not available for pid 1
+amdxdna_drm_open: PASID unavailable and carveout not configured
+```
+
+**3. `force_iova=1` CALISMIYOR -- caveat dogrulandi.**
+
+```
+amdxdna_iommu_init: Enabled force_iova mode.
+amdxdna_iommu_init: Failed to alloc iommu domain
+probe with driver amdxdna failed with error -95
+```
+
+Domain `IOMMU_HWPT_ALLOC_PASID` bayragiyla ayriliyor; vIOMMU bunu
+desteklemeyince probe TAMAMEN basarisiz oluyor. Yani IOVA modu, SVA
+olmayan ortamda kurtarici degil -- durumu daha da kotulestiriyor.
+
+**4. QEMU'nun amd-iommu'sunda PASID destegi YOK.**
+
+`hw/i386/amd_iommu.c` icinde "pasid" gecen tek satir yok. Buna karsilik
+`hw/i386/intel_iommu.c` icinde 367 gecis var (scalable mode, `svm=on`,
+`pasid-bits`). Yani bugun VM icinde PASID'e giden tek yol Intel vIOMMU.
+
+**5. Intel vIOMMU + SVM ile daha ileri gidiliyor ama SVA yine baglanmiyor.**
+
+`-device intel-iommu,scalable-mode=on,svm=on,fsts=on,pasid-bits=16,`
+`device-iotlb=on,intremap=on` ile hata `-28` yerine `-19` oluyor.
+Aygitimiz ATS + PRI + PASID genisletilmis yeteneklerini bildiriyor ve
+guest bunlari goruyor:
+
+```
+ext cap @0x100 id=0x000f (ATS)
+ext cap @0x140 id=0x0013 (PRI)
+ext cap @0x180 id=0x001b (PASID)
+```
+
+Kalan engel emulatorde degil, vIOMMU/kernel SVA etkinlestirme yolunda.
+
+**6. Yan bulgu: PSP yolu IOMMU'dan gecmiyor.**
+
+Ilk denemede IOMMU ceviri modundayken firmware yuklemesi sayfa hatasi
+verdi:
+
+```
+DMAR: [DMA Read NO_PASID] Request device [0000:00:03.0] fault addr 0x2410000
+      [fault reason 0x71] SM: Present bit in first-level paging entry is clear
+```
+
+Sebep: surucu firmware tamponunun adresini `virt_to_phys()` ile veriyor,
+yani DMA API'sini atliyor. Gercek donanimda PSP fiziksel bellege dogrudan
+erisiyor. Emulator artik bunu ayri bir `phys_read` callback'i ile
+modelliyor (QEMU tarafinda `address_space_read`), ve ceviri acikken de
+firmware yukleniyor. **Bu, emulatorun fidelity'sini artiran gercek bir
+duzeltmeydi.**
+
+**7. Yan bulgu: surucu hipervizor altinda calismayi reddediyor.**
+
+`aie2_pci.c`:
+
+```c
+if (!hypervisor_is_type(X86_HYPER_NATIVE)) {
+        XDNA_ERR(xdna, "Running under hypervisor not supported");
+        return -EINVAL;
+}
+```
+
+QEMU'yu **TCG ile** (yani `-accel kvm` olmadan) kosturunca kernel
+`X86_HYPER_NATIVE` goruyor ve kontrol geciyor. **KVM ile bu kontrol
+basarisiz olur** -- performansli bir kurulum icin bu ayri bir engel.
+
 ### Sonuc
 
-Asama 3 artik "QEMU AMD vIOMMU'da SVA gelistirmesi gerekebilir, yoksa proje
-tikanir" degil. Sirali plan:
+Sirali plan guncellendi:
 
-1. **Once IOVA modu.** `amdxdna.force_iova=1` ile guest'te probe ve context
-   olusturmayi calistir. Emulator zaten PASID'i sadece kaydediyor, DMA'yi
-   guest fiziksel adresi uzerinden yapiyor -- IOVA modunda bu dogru davranis.
-2. **Sonra tam SVA.** Coklu process izolasyonu ve gercek per-process adres
-   uzayi icin vIOMMU tarafinda PASID/PRI/ATS gerekiyor. Bu, projenin degil
-   QEMU'nun isi; paralel olarak takip edilmeli.
+1. **Bugun calisan yapilandirma:** `-device amd-iommu` + TCG. Probe
+   geciyor, `/dev/accel/accel0` olusuyor, telemetri ve surum sorgulari
+   calisiyor. Yalnizca `open()` yapilamiyor.
+2. **`open()` icin gereken:** vIOMMU tarafinda calisan SVA. Aygit tarafinda
+   yapilabilecek her sey yapildi (ATS/PRI/PASID bildiriliyor). Kalan is
+   QEMU/kernel tarafinda.
+3. **Alternatif:** surucuye carveout yapilandirmasi eklemek (npu1 yolunda
+   su an cagrilmiyor) veya SVA gerektirmeyen bir client yolu. Bu, upstream
+   surucuye katki gerektirir.
+4. **KVM istenirse** hipervizor tespiti ayrica ele alinmali.
 
 Kaynaklar:
 [QEMU VT-d ATS serisi](https://patchew.org/QEMU/20240521130946.117849-1-clement.mathieu--drif@eviden.com/),

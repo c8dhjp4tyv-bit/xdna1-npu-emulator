@@ -57,9 +57,9 @@ Her iki testin kodu da emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 | Asama | Durum |
 | --- | --- |
 | 1. PCI kabugu | **QEMU'da derlendi ve dogrulandi** |
-| 2. Surucu boot'u | cekirdek tamam, testli |
-| 3. Guest IOMMU (SVA/PASID) | plan var, bkz. acik sorular |
-| 4. Yonetim firmware'i (MERT) | temel mesajlar tamam, testli |
+| 2. Surucu boot'u | **gercek guest'te dogrulandi** |
+| 3. Guest IOMMU (SVA/PASID) | deneyle karakterize; vIOMMU engeli |
+| 4. Yonetim firmware'i (MERT) | **gercek guest'te dogrulandi** |
 | 5. Bellek modeli / DMA | tile bellegi + DMA tamam, testli |
 | 6. XDNA array modeli | tamam, stream switch dahil |
 | 7. AIE instruction interpreter | **baslanmadi -- kalan asil is** |
@@ -68,6 +68,26 @@ Her iki testin kodu da emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 | 10. Uyumluluk + performans | baslanmadi |
 
 Tam liste ve kabul kriterleri: [`docs/02-yol-haritasi.md`](docs/02-yol-haritasi.md).
+
+## Gercek guest'te dogrulama
+
+Emulator, gercek bir Linux guest'inde **degistirilmemis stock `amdxdna`
+surucusuyle** kosturuldu:
+
+```
+/dev/accel: accel0
+/sys/class/accel/accel0/device/vbnv = RyzenAI-npu1
+/sys/class/accel/accel0/device/fw_version = 5.7.0.0
+```
+
+Surucu aygiti buldu, SMU guc dizisini ve PSP firmware yuklemesini gecti,
+firmware el sikismasini tamamladi, mailbox uzerinden surum sorgularini
+yapti ve `/dev/accel/accel0` olusturdu.
+
+`/dev/accel/accel0` **open()** edilemiyor: surucu client acildiginda
+`iommu_sva_bind_device()` cagiriyor ve QEMU vIOMMU'sunda SVA baglanmiyor.
+Kurulum, tekrar uretim ve tam analiz: [`qemu/guest-test/`](qemu/guest-test/)
+ve [`docs/03-acik-sorular.md`](docs/03-acik-sorular.md).
 
 `EXEC_DPU` ve `CHAIN_EXEC_DPU` gercek ctrlcode'u yurutuyor: host bellegindin
 DMA ile okunuyor, XAie transaction'lari yorumlaniyor ve array uzerinde

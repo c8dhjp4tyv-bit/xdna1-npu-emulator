@@ -7,8 +7,7 @@
  *
  * SPDX-License-Identifier: GPL-2.0-only
  *
- * DIKKAT: Bu dosya bu depoda DERLENMEMISTIR -- konteynerde QEMU agaci yok.
- * Derlemek icin qemu/README.md'deki adimlari izleyin.
+ * QEMU agacina yerlestirme ve derleme icin: qemu/README.md
  */
 
 #include "qemu/osdep.h"
@@ -16,6 +15,7 @@
 #include "qemu/module.h"
 #include "hw/pci/pci_device.h"
 #include "hw/pci/msix.h"
+#include "system/address-spaces.h"
 #include "qom/object.h"
 
 #include "xdna/xdna_emu.h"
@@ -31,6 +31,19 @@ OBJECT_DECLARE_SIMPLE_TYPE(XdnaNpuState, XDNA_NPU)
  */
 #define XDNA_MSIX_TABLE_OFFSET 0x40000
 #define XDNA_MSIX_PBA_OFFSET   0x50000
+
+/*
+ * PCIe genisletilmis yetenek offsetleri. Gercek NPU, surucunun
+ * iommu_sva_bind_device() cagirabilmesi icin ATS + PRI + PASID
+ * yeteneklerini bildirmek zorunda; bunlar olmadan IOMMU cihazi
+ * SVA'ya uygun gormez.
+ */
+#define XDNA_ATS_CAP_OFFSET    0x100
+#define XDNA_PRI_CAP_OFFSET    0x140
+#define XDNA_PASID_CAP_OFFSET  0x180
+/* SECIM: PASID genisligi ve bekleyen sayfa istegi kapasitesi. */
+#define XDNA_PASID_WIDTH       16
+#define XDNA_PRI_OUTSTANDING   32
 
 struct XdnaNpuState {
     PCIDevice parent_obj;
@@ -62,6 +75,20 @@ static int xdna_host_dma_write(void *opaque, uint64_t addr, const void *buf,
     return pci_dma_write(PCI_DEVICE(s), addr, buf, len) == MEMTX_OK ? 0 : -1;
 }
 
+/*
+ * PSP yolu: IOMMU'dan gecmeyen fiziksel bellek okumasi. Surucu firmware
+ * tamponunun adresini virt_to_phys() ile veriyor; cihazin cevrilmis DMA
+ * yolundan okumak IOMMU ceviri modundayken sayfa hatasi uretir.
+ */
+static int xdna_host_phys_read(void *opaque, uint64_t addr, void *buf,
+                               size_t len)
+{
+    return address_space_read(&address_space_memory, addr,
+                              MEMTXATTRS_UNSPECIFIED, buf, len) == MEMTX_OK
+               ? 0
+               : -1;
+}
+
 static void xdna_host_raise_irq(void *opaque, unsigned vector)
 {
     XdnaNpuState *s = opaque;
@@ -89,6 +116,7 @@ static void xdna_host_log(void *opaque, int level, const char *msg)
 static const XdnaHostOps xdna_host_ops = {
     .dma_read = xdna_host_dma_read,
     .dma_write = xdna_host_dma_write,
+    .phys_read = xdna_host_phys_read,
     .raise_irq = xdna_host_raise_irq,
     .log = xdna_host_log,
 };
@@ -197,6 +225,15 @@ static void xdna_npu_realize(PCIDevice *pdev, Error **errp)
      * ayarlaniyor; surucu buna bakmiyor ama lspci ciktisi anlamli oluyor.
      */
     pcie_endpoint_cap_init(pdev, 0);
+
+    /*
+     * SVA icin gereken yetenekler. amdxdna, bir userspace client
+     * acildiginda iommu_sva_bind_device() cagiriyor; bu da cihazin
+     * ATS, PRI ve PASID bildirmesini gerektiriyor.
+     */
+    pcie_ats_init(pdev, XDNA_ATS_CAP_OFFSET, true);
+    pcie_pri_init(pdev, XDNA_PRI_CAP_OFFSET, XDNA_PRI_OUTSTANDING, true);
+    pcie_pasid_init(pdev, XDNA_PASID_CAP_OFFSET, XDNA_PASID_WIDTH, true, true);
 }
 
 static void xdna_npu_exit(PCIDevice *pdev)

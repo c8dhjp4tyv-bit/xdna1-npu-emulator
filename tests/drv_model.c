@@ -65,6 +65,7 @@ static void host_log(void *opaque, int level, const char *msg)
 
 const XdnaHostOps drv_host_ops = {
     .dma_read = host_dma_read,
+    .phys_read = host_dma_read,   /* testte ayrim yok */
     .dma_write = host_dma_write,
     .raise_irq = host_raise_irq,
     .log = host_log,

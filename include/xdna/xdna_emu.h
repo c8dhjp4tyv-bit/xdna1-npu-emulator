@@ -34,9 +34,18 @@ enum {
  * degerdir (QEMU'da PCIDevice*, testlerde sahte bellek modeli).
  */
 typedef struct XdnaHostOps {
-    /* Guest fiziksel bellegine erisim. 0 = basarili, <0 = hata. */
+    /* Cihazin DMA yolu (IOMMU'dan gecer). 0 = basarili, <0 = hata. */
     int (*dma_read)(void *opaque, uint64_t addr, void *buf, size_t len);
     int (*dma_write)(void *opaque, uint64_t addr, const void *buf, size_t len);
+    /*
+     * Platform fiziksel bellek okumasi -- IOMMU'dan GECMEZ.
+     * PSP firmware yukleme yolu icin: surucu firmware tamponunun adresini
+     * virt_to_phys() ile veriyor, yani DMA API'sini atliyor. Bunu cihazin
+     * cevrilmis DMA yolundan okumak, IOMMU ceviri modundayken sayfa
+     * hatasina yol acar. Gercek donanimda PSP fiziksel bellege dogrudan
+     * erisir. NULL ise dma_read'e dusulur.
+     */
+    int (*phys_read)(void *opaque, uint64_t addr, void *buf, size_t len);
     /* MSI-X vektorunu tetikle. */
     void (*raise_irq)(void *opaque, unsigned vector);
     /* Istege bagli; NULL olabilir. */

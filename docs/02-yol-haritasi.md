@@ -6,9 +6,9 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 | # | Asama | Durum |
 | --- | --- | --- |
 | 1 | PCI kabugu | **derlendi ve dogrulandi** |
-| 2 | Surucu boot'u (PSP/SMU/firmware) | **cekirdek tamam, testli** |
-| 3 | Guest IOMMU: SVA/PASID | acik problem |
-| 4 | Yonetim firmware'i (MERT) | **temel mesajlar tamam, testli** |
+| 2 | Surucu boot'u (PSP/SMU/firmware) | **gercek guest'te dogrulandi** |
+| 3 | Guest IOMMU: SVA/PASID | deneyle karakterize edildi; vIOMMU engeli |
+| 4 | Yonetim firmware'i (MERT) | **gercek guest'te dogrulandi** |
 | 5 | Bellek modeli (BO, DMA, heap) | **tile bellegi + DMA tamam, testli** |
 | 6 | XDNA array mimari modeli | **tamam, stream switch dahil** |
 | 7 | AIE instruction interpreter | baslanmadi (asil kalan is) |
@@ -45,9 +45,17 @@ kanalinin kurulmasi.
 **Kabul:** stock `amdxdna` probe'u hatasiz tamamlanir, `/dev/accel/accel0`
 olusur, `dmesg` icinde firmware ve AIE surumu gorunur.
 
-**Durum:** cekirdek tarafi tamam. `make test` -> `tests/test_boot.c`,
-surucunun boot dizisini birebir taklit ederek 1390 kontrolu geciriyor.
-Gercek guest ile dogrulama, asama 1'in derlenmesine bagli.
+**Durum: KAPANDI.** Gercek bir guest'te, degistirilmemis `amdxdna` ile:
+
+```
+amdxdna 0000:00:03.0: [drm] Load firmware amdnpu/1502_00/npu.sbin
+[drm] Initialized amdxdna_accel_driver 0.10.0 for 0000:00:03.0 on minor 0
+/sys/class/accel/accel0/device/vbnv = RyzenAI-npu1
+/sys/class/accel/accel0/device/fw_version = 5.7.0.0
+```
+
+Kurulum ve tekrar uretim: `qemu/guest-test/`.
+Ayrica `make test` -> `tests/test_boot.c` 1390 kontrol.
 
 ## 3. Guest IOMMU: SVA/PASID
 
@@ -63,6 +71,12 @@ Ayrintili degerlendirme: `docs/03-acik-sorular.md`.
 **Kabul:** guest'te `iommu_sva_bind_device()` gercekten basarili doner ve
 her process kendi PASID'i ile ayri context alir.
 
+**Durum:** deneyle karakterize edildi, kapanmadi. Aygit tarafinda
+yapilabilecek her sey yapildi: ATS + PRI + PASID genisletilmis yetenekleri
+bildiriliyor ve guest bunlari goruyor. Kalan engel QEMU vIOMMU / kernel SVA
+etkinlestirme yolunda. `force_iova=1` kurtarici degil -- probe'u tamamen
+basarisiz kiliyor. Tum deney sonuclari: `docs/03-acik-sorular.md`.
+
 ## 4. Yonetim firmware'i (MERT)
 
 Mesaj protokolu, sorgular, context yasam dongusu, runtime config, telemetri,
@@ -71,7 +85,11 @@ reset.
 **Kabul:** `xrt-smi examine` cihazi ve ozelliklerini dogru raporlar; context
 olustur/yok et dongusu limitleriyle birlikte dogru davranir.
 
-**Durum:** su an desteklenen opcode'lar: `GET_PROTOCOL_VERSION`,
+**Durum:** gercek guest'te dogrulandi -- surucu surum sorgularini,
+tile bilgisini ve telemetriyi mailbox uzerinden basariyla aliyor
+(`fw_version = 5.7.0.0` bizim emule ettigimiz surum).
+
+Su an desteklenen opcode'lar: `GET_PROTOCOL_VERSION`,
 `GET_FIRMWARE_VERSION`, `QUERY_AIE_VERSION`, `QUERY_AIE_TILE_INFO`,
 `SET/GET_RUNTIME_CONFIG`, `ASSIGN_MGMT_PASID`, `SUSPEND`, `RESUME`,
 `INVOKE_SELF_TEST`, `CREATE/DESTROY_CONTEXT`, `MAP/ADD_HOST_BUFFER`,

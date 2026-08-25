@@ -40,8 +40,14 @@ static uint32_t psp_fetch_image(XdnaNpu *npu, uint64_t paddr, uint32_t size)
     if (!size) {
         return PSP_ERROR_BAD_STATE;
     }
-    if (!npu->ops->dma_read ||
-        npu->ops->dma_read(npu->opaque, paddr, peek, n) != 0) {
+    /*
+     * PSP fiziksel adresle calisir (surucu virt_to_phys() veriyor), bu
+     * yuzden IOMMU'dan gecmeyen yolu tercih ediyoruz.
+     */
+    int (*rd)(void *, uint64_t, void *, size_t) =
+        npu->ops->phys_read ? npu->ops->phys_read : npu->ops->dma_read;
+
+    if (!rd || rd(npu->opaque, paddr, peek, n) != 0) {
         xdna_log(npu, XDNA_LOG_ERROR,
                  "PSP firmware imaji okunamadi: paddr 0x%llx size 0x%x",
                  (unsigned long long)paddr, size);
