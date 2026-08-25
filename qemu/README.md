@@ -48,6 +48,7 @@ system_ss.add(when: 'CONFIG_XDNA_NPU', if_true: files(
   'xdna/xdna_array.c',
   'xdna/xdna_txn.c',
   'xdna/xdna_error.c',
+  'xdna/xdna_core.c',
 ))
 ```
 

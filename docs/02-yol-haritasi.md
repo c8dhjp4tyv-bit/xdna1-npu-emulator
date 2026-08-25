@@ -11,7 +11,7 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 | 4 | Yonetim firmware'i (MERT) | **gercek guest'te dogrulandi** |
 | 5 | Bellek modeli (BO, DMA, heap) | **tile bellegi + DMA tamam, testli** |
 | 6 | XDNA array mimari modeli | **tamam, stream switch dahil** |
-| 7 | AIE instruction interpreter | iskelet + paket cozucu var; ISA yok |
+| 7 | AIE instruction interpreter | **cozme katmani tamam**; semantik yok |
 | 8 | ctrlcode motoru | **tamam, testli** |
 | 9 | Uctan uca gercek workload | veri hareketi calisiyor; compute eksik |
 | 10 | Uyumluluk + performans | baslanmadi |
@@ -166,8 +166,10 @@ Tipki bir CPU emulatoru gibi. En buyuk belirsizlik burada; bkz.
 **Kabul:** bilinen bir cekirdek (orn. tek tile'lik bir GEMM) bilinen girdi
 icin bit-birebir dogru cikti uretir.
 
-**Durum:** yurutme iskeleti ve **paket uzunlugu cozucusu** yazildi;
-instruction seti henuz yok.
+**Durum:** **cozme (decode) katmani tamam**, yurutme (semantik) yok.
+Yazilanlar: yurutme iskeleti, **paket uzunlugu cozucusu** ve **bundle slot
+cozucusu**. Eksik olan, slot iceriklerinin ne anlama geldigi -- yani
+instruction setinin kendisi.
 
 AIE2 degisken uzunluklu bir VLIW: paket boyutu ilk kelimenin dusuk
 bitlerindeki onek koduyla belirtiliyor. Kodlama `Xilinx/llvm-aie`
@@ -205,33 +207,89 @@ Ornek cikti:
 ```
 
 Son satir 128 bitlik bundle'in **bes slot** tasidigini gosteriyor
-(b / a / s / xm / vektor), yani slot cozumunun hedefi bu.
+(b / a / s / xm / vektor).
 
 Uretilen altin vektorler `tests/aie2_vectors.h` icinde ve test paketi
 bunlara karsi kosuyor; uretici betik `tools/gen-aie2-vectors.py`.
 
+### 7b. Bundle slot cozucusu
+
+AIE2 bir VLIW: her paket birkac islev biriminin ("slot") alanlarini yan
+yana tasiyor. Hangi slotlarin bulundugunu ve bit araliklarini
+**composite format** belirliyor; formati de paketin icindeki sabit bitler
+ayirt ediyor. `llvm-aie`'nin `AIE2CompositeFormats.td` dosyasi bu
+formatlarin **tamamini** TableGen ile tanimliyor:
+
+| Boyut | Format sayisi |
+| --- | --- |
+| 2 bayt | 1 |
+| 4 bayt | 6 |
+| 6 bayt | 9 |
+| 8 bayt | 11 |
+| 10 bayt | 21 |
+| 12 bayt | 20 |
+| 14 bayt | 8 |
+| 16 bayt | 2 |
+| **toplam** | **78** |
+
+Slot genislikleri sabit: `ldb` 16, `lda` 21, `st` 21, `alu` 20, `mv` 22,
+`vec` 26, `lng` 42, `nop` 1 bit.
+
+`tools/gen-aie2-formats.py` bu TableGen hiyerarsisini cozup duz bir C
+tablosuna ceviriyor (`src/aie2_formats.h`, 78 satir); `xdna_aie2_decode()`
+paketi bu tabloya gore formatina ve slotlarina ayiriyor. Uretici, **ayni
+boyuttaki formatlarin sabit bitlerinin birbirinden ayirt edilebildigini**
+dogruluyor -- yani cozum belirsiz degil, en fazla bir format eslesiyor.
+
+Ornek: 16 baytlik bundle iki formattan biri, ayirt edici bit 27:
+
+```
+bit 27 = 0 : ldb[127:112] lda[111:91] st[90:70] lng[69:28]         vec[26:1]
+bit 27 = 1 : ldb[127:112] lda[111:91] st[90:70] alu[69:50] mv[49:28] vec[26:1]
+```
+
+**Bu yerlesim de tahmin degil, olculdu.** `llvm-mc -triple=aie2`
+disassembler'ina karsi differential test kosuldu:
+
+1. Her format icin llvm'in tam olarak 1 instruction olarak cozdugu
+   gecerli bir paket bulundu -- **78 formatin 78'i icin bulundu**.
+2. llvm'in `;` ile ayirarak yazdigi slot sayisi bizim tablomuzdakiyle
+   karsilastirildi -- **78 / 78 uyustu**.
+3. Her slotun bit araligindan bir bit cevrilip llvm ciktisinda yalnizca
+   bir slotun degistigi ve **hangi** slotun degistigi olculdu --
+   **229 slotun 228'i dogrulandi, 0 yanlis**. Ayirt edilemeyen tek slot
+   `instr16`'nin tek bitlik `nop` alani; iki degeri de `nop` bastigi icin
+   ayrilamiyor (o formatta zaten tek slot var).
+
+Olculen kayitlar `tests/aie2_slot_vectors.h` icinde ve `tests/test_core.c`
+bizim cozucumuzun **ayni** slotu degistirdigini dogruluyor -- yani test
+kendi tablomuza degil, llvm'in ciktisina bakiyor.
+
+Negatif taraf da sinaniyor: `0x20000019` deseni instr32 etiketini tasiyor
+ama hicbir formatin sabit bitlerine uymuyor; `xdna_aie2_decode()` reddediyor,
+`llvm-mc` de "invalid instruction encoding" diyor.
+
 `CORE_CONTROL` enable artik gercekten calisiyor: emulator program
-bellegini getiriyor, paketi dogru siniriyor ve slot'lari
-calistiramadigi icin **ERROR_HALT** ile duruyor. `CORE_PC`, `CORE_SP`,
-`CORE_LR` ve `CORE_STATUS` gercek register offsetlerinde okunabiliyor;
-ayrica surucuye `AIE_ERROR_INSTRUCTION` (core modulu, olay 59) asenkron
-hatasi bildiriliyor.
+bellegini getiriyor, paketi siniriyor, **formatini bulup slotlarina
+ayiriyor** ve yurutemedigi icin **ERROR_HALT** ile duruyor. `CORE_PC`,
+`CORE_SP`, `CORE_LR` ve `CORE_STATUS` gercek register offsetlerinde
+okunabiliyor; ayrica surucuye `AIE_ERROR_INSTRUCTION` (core modulu,
+olay 59) asenkron hatasi bildiriliyor. Gunluk ornegi:
 
-Yani "core enable edildi ama hicbir sey olmadi" durumu bitti: hangi
-PC'de, hangi boyutta bir paketle karsilastigimiz raporlaniyor.
+```
+core(0,2): PC 0x0, 4 baytlik AIE2 paketi AIE2__instr32__vec formatinda
+           1 slota cozuldu ama instruction semantikleri uygulanmadi
+           -- ERROR_HALT
+```
 
-**Kalan:** slot cozumu ve semantik. VLIW paketi icindeki alu / lda / st /
-mv slot'larinin kodlamalari `llvm-aie` TableGen'inde tam olarak var
-(`AIE2GenInstrFormats.td`, her instruction sinifi icin bit atamalari).
-
-Artik elimizde calisan bir altin standart var (`llvm-mc -triple=aie2`),
-yani slot cozucusu **differential test ile** gelistirilebilir: bizim
-cozumumuzu llvm'in ciktisiyla karsilastir. Bu, ISA alt kumesini
-dogrulanabilir sekilde implemente etmenin saglam yolu.
-
-Ama net olmak gerekirse: tam AIE2 vektor semantigi (saturasyon,
-yuvarlama modlari, akumulator genisligi, permute agi) hala aylar
-mertebesinde bir is. Bu asamada altyapisi kuruldu, kendisi degil.
+**Kalan: semantik.** Slotlarin *icindeki* opcode/operand kodlamalari
+`llvm-aie` TableGen'inde var (`AIE2GenInstrInfo`, binlerce instruction
+sinifi) ve `llvm-mc` altin standart olarak elimizde -- yani bu is de
+differential test ile ilerletilebilir. Ama net olmak gerekirse: binlerce
+instruction sinifinin kodlamasini cikarmak ve ustune tam AIE2 vektor
+semantigini (saturasyon, yuvarlama modlari, akumulator genisligi, permute
+agi) dogrulamak hala **aylar mertebesinde** bir is. Bu asamada cozme
+katmani ve onu dogrulayan altyapi kuruldu; yurutme kurulmadi.
 
 ## 8. ctrlcode motoru
 

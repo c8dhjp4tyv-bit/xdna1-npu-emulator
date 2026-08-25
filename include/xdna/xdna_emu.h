@@ -111,4 +111,60 @@ void xdna_npu_get_stats(const XdnaNpu *npu, XdnaStats *out);
  */
 uint32_t xdna_aie2_packet_size(uint32_t first_word);
 
+/*
+ * AIE2 VLIW bundle (composite paket) slot cozucusu.
+ *
+ * AIE2 bir VLIW: her paket, birkac islev biriminin ("slot") alanlarini yan
+ * yana tasiyor. Hangi slotlarin bulundugunu ve hangi bit araliklarinda
+ * durduklarini "composite format" belirliyor; formati de paketin icindeki
+ * sabit bitler ayirt ediyor.
+ *
+ * Slot kimlikleri Xilinx/llvm-aie AIE2CompositeFormats.td'deki adlarla
+ * birebir ayni:
+ *   lda / ldb  yukleme birimleri      st   saklama birimi
+ *   alu        skaler ALU             mv   tasima birimi
+ *   vec        vektor birimi          lng  alu+mv yerine gecen uzun alan
+ *   nop        tek bitlik dolgu
+ */
+typedef enum {
+    AIE2_SLOT_LDA = 0,
+    AIE2_SLOT_LDB,
+    AIE2_SLOT_ST,
+    AIE2_SLOT_ALU,
+    AIE2_SLOT_MV,
+    AIE2_SLOT_LNG,
+    AIE2_SLOT_VEC,
+    AIE2_SLOT_NOP,
+    AIE2_SLOT_KINDS
+} Aie2SlotKind;
+
+#define AIE2_MAX_SLOTS 6u
+
+typedef struct {
+    Aie2SlotKind kind;
+    uint8_t width;      /* bit cinsinden slot genisligi */
+    uint64_t value;     /* slottan cikarilmis ham alan */
+} Aie2Slot;
+
+typedef struct {
+    uint32_t size;              /* paket boyutu, bayt */
+    const char *format;         /* eslesen composite format adi */
+    unsigned nslots;
+    Aie2Slot slot[AIE2_MAX_SLOTS];  /* en anlamli bitten en az anlamliya */
+} Aie2Bundle;
+
+/*
+ * `bytes` ile baslayan `avail` baytlik bellekten bir bundle coz.
+ *
+ * Basarili olursa 0 doner ve *out doldurulur. Paket uzunlugu cozulemezse,
+ * `avail` yetmezse veya hicbir composite format eslesmezse -1 doner --
+ * eslesmeyen desen gecersiz bir kodlamadir, "sessizce atlanacak" bir sey
+ * degil.
+ *
+ * Slot adi -> okunabilir metin icin xdna_aie2_slot_name().
+ */
+int xdna_aie2_decode(const uint8_t *bytes, size_t avail, Aie2Bundle *out);
+
+const char *xdna_aie2_slot_name(Aie2SlotKind kind);
+
 #endif /* XDNA_EMU_H */

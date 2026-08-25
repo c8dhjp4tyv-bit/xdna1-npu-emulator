@@ -2,9 +2,11 @@
 /*
  * Compute tile yurutme cekirdegi testleri.
  *
- * Iki bolum:
+ * Uc bolum:
  *   1. AIE2 VLIW paket uzunlugu cozucusu -- saf fonksiyon, tam kapsam.
- *   2. Core enable yolu -- program bellegine yazip core'u calistiriyor ve
+ *   2. AIE2 bundle slot cozucusu -- llvm-aie ile uretilmis differential
+ *      vektorlere karsi.
+ *   3. Core enable yolu -- program bellegine yazip core'u calistiriyor ve
  *      ERROR_HALT ile durdugunu YALNIZCA MMIO uzerinden dogruluyor
  *      (ctrlcode MASKPOLL ile).
  */
@@ -14,6 +16,7 @@
 
 #include "drv_model.h"
 #include "aie2_vectors.h"
+#include "aie2_slot_vectors.h"
 
 #define CTRLCODE_ADDR (HOST_MEM_BASE + 0x300000)
 
@@ -106,7 +109,155 @@ static void test_packet_sizes(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* 2. Core enable yolu                                               */
+/* 2. Bundle slot cozucusu                                           */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Vektorler tools/gen-aie2-formats.py --vectors ile uretildi. Testin
+ * BAGIMSIZ oldugu iki nokta:
+ *
+ *   llvm_slots : llvm-aie disassembler'inin ";" ile ayirarak yazdigi slot
+ *                sayisi. Bizim tablomuz farkli sayida slot bulursa
+ *                yerlesim yanlis demektir.
+ *   flips      : llvm ciktisinda yalnizca N. slotu degistiren bir bit.
+ *                Bizim cozumumuzde de yalnizca N. slot degismeli.
+ */
+static void test_slot_decode(void)
+{
+    size_t i;
+
+    step("Bundle cozucusu: her composite format cozulmeli");
+    CHECK_EQ(AIE2_SLOT_VECTOR_COUNT, 78u, "differential vektor sayisi");
+    for (i = 0; i < AIE2_SLOT_VECTOR_COUNT; i++) {
+        const Aie2SlotVector *v = &aie2_slot_vectors[i];
+        Aie2Bundle b;
+
+        CHECK(xdna_aie2_decode(v->bytes, v->size, &b) == 0,
+              "vektor %u (%s) cozulemedi", (unsigned)i, v->format);
+        if (b.format == NULL) {
+            continue;
+        }
+        CHECK(strcmp(b.format, v->format) == 0,
+              "vektor %u: format %s beklendi, %s bulundu", (unsigned)i,
+              v->format, b.format);
+        CHECK(b.size == v->size, "vektor %u (%s): boyut %u beklendi, %u bulundu",
+              (unsigned)i, v->format, v->size, b.size);
+        /* Asil bagimsiz kontrol: slot sayisi llvm ile ayni mi? */
+        CHECK(b.nslots == v->llvm_slots,
+              "vektor %u (%s): llvm %u slot yazdi, biz %u bulduk (%s)",
+              (unsigned)i, v->format, v->llvm_slots, b.nslots, v->disasm);
+    }
+
+    step("Bundle cozucusu: bit-flip esleme llvm ile ayni slotu gostermeli");
+    {
+        unsigned flips = 0;
+
+        for (i = 0; i < AIE2_SLOT_VECTOR_COUNT; i++) {
+            const Aie2SlotVector *v = &aie2_slot_vectors[i];
+            Aie2Bundle base;
+            unsigned f;
+
+            if (xdna_aie2_decode(v->bytes, v->size, &base) != 0) {
+                continue;
+            }
+            for (f = 0; f < v->nflips; f++) {
+                uint8_t buf[16];
+                Aie2Bundle mod;
+                unsigned bit = v->flips[f].bit;
+                unsigned want = v->flips[f].slot;
+                unsigned s, diff = 0, which = 0;
+
+                memcpy(buf, v->bytes, v->size);
+                buf[bit >> 3] ^= (uint8_t)(1u << (bit & 7u));
+
+                CHECK(xdna_aie2_decode(buf, v->size, &mod) == 0,
+                      "vektor %u (%s): bit %u cevrilince cozulemedi",
+                      (unsigned)i, v->format, bit);
+                if (mod.format == NULL || mod.nslots != base.nslots) {
+                    continue;
+                }
+                for (s = 0; s < base.nslots; s++) {
+                    if (mod.slot[s].value != base.slot[s].value) {
+                        diff++;
+                        which = s;
+                    }
+                }
+                CHECK(diff == 1,
+                      "vektor %u (%s): bit %u tam bir slotu degistirmeli, "
+                      "%u slot degisti", (unsigned)i, v->format, bit, diff);
+                if (diff == 1) {
+                    CHECK(which == want,
+                          "vektor %u (%s): bit %u llvm'e gore slot %u, "
+                          "bize gore slot %u", (unsigned)i, v->format, bit,
+                          want, which);
+                }
+                flips++;
+            }
+        }
+        CHECK(flips >= 220, "yeterli bit-flip kontrolu (%u)", flips);
+    }
+
+    step("Bundle cozucusu: gecersiz kodlama reddedilmeli");
+    {
+        /*
+         * 0x20000019: instr32 etiketi (0b1001) tasiyor ama hicbir instr32
+         * formatinin sabit bitlerine uymuyor. llvm-aie de bu deseni
+         * "invalid instruction encoding" diye reddediyor.
+         */
+        static const uint8_t bad[4] = { 0x19, 0x00, 0x00, 0x20 };
+        static const uint8_t good[4] = { 0x19, 0x00, 0x00, 0x00 };
+        Aie2Bundle b;
+
+        CHECK(xdna_aie2_decode(bad, sizeof(bad), &b) != 0,
+              "eslesmeyen sabit bitler kabul edilmemeli");
+        CHECK(xdna_aie2_decode(good, sizeof(good), &b) == 0,
+              "gecerli instr32 kodlamasi cozulmeli");
+        CHECK(xdna_aie2_decode(good, 2, &b) != 0,
+              "tampon yetmiyorsa cozulmemeli");
+        CHECK(xdna_aie2_decode(good, 0, &b) != 0, "bos tampon");
+    }
+
+    step("Bundle cozucusu: instr128 alan genislikleri");
+    {
+        /* Tumu sifir: instr128 ldb/lda/st/lng/vec formati. */
+        static const uint8_t z[16] = { 0 };
+        Aie2Bundle b;
+        static const struct { Aie2SlotKind kind; uint8_t width; } want[] = {
+            { AIE2_SLOT_LDB, 16 }, { AIE2_SLOT_LDA, 21 },
+            { AIE2_SLOT_ST,  21 }, { AIE2_SLOT_LNG, 42 },
+            { AIE2_SLOT_VEC, 26 },
+        };
+        unsigned s;
+
+        CHECK(xdna_aie2_decode(z, sizeof(z), &b) == 0, "sifir paket cozulmeli");
+        CHECK_EQ(b.nslots, 5u, "instr128 lng formatinda 5 slot");
+        for (s = 0; s < b.nslots && s < 5u; s++) {
+            CHECK(b.slot[s].kind == want[s].kind,
+                  "slot %u: %s beklendi, %s bulundu", s,
+                  xdna_aie2_slot_name(want[s].kind),
+                  xdna_aie2_slot_name(b.slot[s].kind));
+            CHECK(b.slot[s].width == want[s].width,
+                  "slot %u (%s): %u bit beklendi, %u bulundu", s,
+                  xdna_aie2_slot_name(want[s].kind), want[s].width,
+                  b.slot[s].width);
+        }
+    }
+
+    step("Bundle cozucusu: uzunluk vektorleri de cozulebilmeli");
+    for (i = 0; i < AIE2_VECTOR_COUNT; i++) {
+        const Aie2Vector *v = &aie2_vectors[i];
+        Aie2Bundle b;
+
+        CHECK(xdna_aie2_decode(v->bytes, v->size, &b) == 0,
+              "uzunluk vektoru %u (%s) cozulemedi", (unsigned)i, v->disasm);
+        if (b.format) {
+            CHECK(b.size == v->size, "uzunluk vektoru %u: boyut", (unsigned)i);
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- */
+/* 3. Core enable yolu                                               */
 /* ---------------------------------------------------------------- */
 
 typedef struct {
@@ -323,6 +474,7 @@ int main(int argc, char **argv)
     printf("=== XDNA1 emulatoru: compute tile yurutme cekirdegi ===\n");
 
     test_packet_sizes();
+    test_slot_decode();
 
     host = host_new(argc > 1 && strcmp(argv[1], "-v") == 0);
     if (!host) {

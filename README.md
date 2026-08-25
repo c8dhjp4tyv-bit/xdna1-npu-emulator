@@ -22,9 +22,13 @@ src/              QEMU'dan bagimsiz emulator cekirdegi
   xdna_mert.c       yonetim firmware'i (MERT) mesaj isleyicisi
   xdna_array.c      XDNA array: tile'lar, lock'lar, BD'ler, DMA, stream switch
   xdna_txn.c        ctrlcode (XAie transaction) yorumlayicisi
+  xdna_core.c       AIE2 VLIW paket + bundle slot cozucusu
+  aie2_formats.h    uretilmis AIE2 composite format tablosu (78 format)
 tests/            surucu davranisini taklit eden kosumlar
-                    aie2_vectors.h  llvm-aie ile uretilmis altin vektorler
+                    aie2_vectors.h       paket uzunlugu altin vektorleri
+                    aie2_slot_vectors.h  slot yerlesimi differential vektorleri
 tools/            gen-aie2-vectors.py -- altin vektor ureticisi
+                  gen-aie2-formats.py -- format tablosu + slot vektorleri
 qemu/             QEMU PCI aygiti sarmalayicisi
 docs/             hedef, dogrulanmis donanim arayuzu, yol haritasi, acik sorular
 ```
@@ -40,7 +44,7 @@ make          # build/libxdna.a
 make test     # surucu boot dizisi kosumu
 ```
 
-`make test` iki kosum calistirir.
+`make test` uc kosum calistirir.
 
 **test_boot** stock `amdxdna` surucusunun boot dizisini birebir taklit eder --
 SMU guc dizisi, PSP firmware yukleme, firmware el sikismasi, mailbox kanali,
@@ -52,7 +56,13 @@ verinin host -> shim DMA -> memory tile -> shim DMA -> host yolundan birebir
 gectigini dogrular; lock semantigi, BLOCKWRITE, komut zinciri, `SYNC_BO` ve
 dort hata yolu da test edilir.
 
-Her iki testin kodu da emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
+**test_core** AIE2 paket uzunlugu ve bundle slot cozucusunu `llvm-aie`
+disassembler'iyla uretilmis differential vektorlere karsi dogrular, sonra
+program bellegine yazip core'u calistirir ve `ERROR_HALT` ile durdugunu
+yalnizca MMIO uzerinden okur.
+
+test_boot ve test_exec kodu emulatorun ic yapilarina bakmaz; sadece MMIO
+okur/yazar.
 
 ## Durum
 
@@ -64,7 +74,7 @@ Her iki testin kodu da emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 | 4. Yonetim firmware'i (MERT) | **gercek guest'te dogrulandi** |
 | 5. Bellek modeli / DMA | tile bellegi + DMA tamam, testli |
 | 6. XDNA array modeli | tamam, stream switch dahil |
-| 7. AIE instruction interpreter | iskelet + paket cozucu; ISA yok |
+| 7. AIE instruction interpreter | **cozme katmani tamam**; semantik yok |
 | 8. ctrlcode motoru | tamam, testli |
 | 9. Uctan uca workload | veri hareketi calisiyor; compute eksik |
 | 10. Uyumluluk + performans | baslanmadi |
@@ -96,13 +106,21 @@ DMA ile okunuyor, XAie transaction'lari yorumlaniyor ve array uzerinde
 BD/lock/DMA islemleri gerceklesiyor. `tests/test_exec.c` bunu uctan uca
 dogruluyor (host -> memory tile -> host).
 
-Compute tile programlari **yurutulmuyor**: AIE instruction seti (asama 7)
-henuz yok. Ama `CORE_CONTROL` enable artik gercekten calisiyor: emulator
-program bellegini getiriyor, AIE2 VLIW paketini dogru siniriyor (paket
-uzunlugu cozucusu `llvm-aie` TableGen'inden cikarildi) ve slot'lari
-calistiramadigi icin **ERROR_HALT** ile duruyor -- `CORE_PC` ve
-`CORE_STATUS` gercek registerlarda okunabiliyor, surucuye de
-`AIE_ERROR_INSTRUCTION` asenkron hatasi bildiriliyor.
+Compute tile programlari **yurutulmuyor**: AIE2 instruction semantikleri
+(asama 7) henuz yok. Ama **cozme katmani tamam** ve `CORE_CONTROL` enable
+gercekten calisiyor: emulator program bellegini getiriyor, AIE2 VLIW
+paketini siniriyor, 78 composite formattan hangisi oldugunu bulup
+`ldb/lda/st/alu/mv/lng/vec` slotlarina ayiriyor, sonra yurutemedigi icin
+**ERROR_HALT** ile duruyor -- `CORE_PC` ve `CORE_STATUS` gercek
+registerlarda okunabiliyor, surucuye de `AIE_ERROR_INSTRUCTION` asenkron
+hatasi bildiriliyor.
+
+Hem paket uzunlugu hem slot yerlesimi `llvm-aie` TableGen'inden cikarildi
+ve `llvm-mc -triple=aie2` disassembler'ina karsi **differential test ile
+olculdu**: 78 formatin 78'inde slot sayisi uyustu, 229 slot->bit
+eslemesinin 228'i bit-flip ile dogrulandi, 0 yanlis. Ayrinti:
+[`docs/02-yol-haritasi.md`](docs/02-yol-haritasi.md) asama 7.
+
 `EXECUTE_BUFFER_CF`, `CHAIN_EXEC_BUFFER_CF` ve `CHAIN_EXEC_NPU` acikca hata
 donduruyor.
 
