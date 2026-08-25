@@ -348,6 +348,9 @@ void xdna_array_reset(XdnaArray *arr)
             memset(t->ch_queue, 0, sizeof(t->ch_queue));
             t->core_ctrl = 0;
             t->core_status = 0;
+            t->core_pc = 0;
+            t->core_sp = 0;
+            t->core_lr = 0;
             memset(t->ss_master, 0, sizeof(t->ss_master));
             memset(t->ss_slave, 0, sizeof(t->ss_slave));
             t->shim_mux = 0;
@@ -1090,6 +1093,15 @@ uint32_t xdna_array_read32(XdnaArray *arr, uint8_t col, uint8_t row,
         if (off == AIEML_CORE_STATUS) {
             return t->core_status;
         }
+        if (off == AIEML_CORE_PC) {
+            return t->core_pc;
+        }
+        if (off == AIEML_CORE_SP) {
+            return t->core_sp;
+        }
+        if (off == AIEML_CORE_LR) {
+            return t->core_lr;
+        }
     }
 
     return regmap_get(&t->regs, off);
@@ -1193,24 +1205,30 @@ void xdna_array_write32(XdnaArray *arr, uint8_t col, uint8_t row, uint32_t off,
             t->core_ctrl = val;
             if (val & AIE_CORE_CTRL_RESET_MASK) {
                 t->core_status = 0;
+                t->core_pc = 0;
+                t->core_sp = 0;
+                t->core_lr = 0;
             }
             if (val & AIE_CORE_CTRL_ENABLE_MASK) {
-                /*
-                 * Compute tile'i "calistir". Instruction interpreter'i
-                 * (yol haritasi asama 7) henuz yok; core enable edilmis
-                 * gorunuyor ama program yurutulmuyor. Bunu sessizce
-                 * gecmiyoruz, sayacini tutuyoruz.
-                 */
-                t->core_status |= AIE_CORE_CTRL_ENABLE_MASK;
                 arr->stats.core_starts++;
-                xdna_log(arr->npu, XDNA_LOG_WARN,
-                         "array: tile(%u,%u) core enable -- AIE interpreter "
-                         "yok, program yurutulmedi", t->col, t->row);
+                xdna_core_run(arr, t);
             }
             return;
         }
         if (off == AIEML_CORE_STATUS) {
             t->core_status = val;
+            return;
+        }
+        if (off == AIEML_CORE_PC) {
+            t->core_pc = val;
+            return;
+        }
+        if (off == AIEML_CORE_SP) {
+            t->core_sp = val;
+            return;
+        }
+        if (off == AIEML_CORE_LR) {
+            t->core_lr = val;
             return;
         }
     }

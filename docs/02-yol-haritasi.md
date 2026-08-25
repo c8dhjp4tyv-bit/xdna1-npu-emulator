@@ -11,7 +11,7 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 | 4 | Yonetim firmware'i (MERT) | **gercek guest'te dogrulandi** |
 | 5 | Bellek modeli (BO, DMA, heap) | **tile bellegi + DMA tamam, testli** |
 | 6 | XDNA array mimari modeli | **tamam, stream switch dahil** |
-| 7 | AIE instruction interpreter | baslanmadi (asil kalan is) |
+| 7 | AIE instruction interpreter | iskelet + paket cozucu var; ISA yok |
 | 8 | ctrlcode motoru | **tamam, testli** |
 | 9 | Uctan uca gercek workload | veri hareketi calisiyor; compute eksik |
 | 10 | Uyumluluk + performans | baslanmadi |
@@ -160,10 +160,43 @@ Tipki bir CPU emulatoru gibi. En buyuk belirsizlik burada; bkz.
 **Kabul:** bilinen bir cekirdek (orn. tek tile'lik bir GEMM) bilinen girdi
 icin bit-birebir dogru cikti uretir.
 
-**Durum:** baslanmadi. `CORE_CONTROL` enable yazmasi kabul ediliyor ve
-`core_status` guncelleniyor, ama program yurutulmuyor -- her seferinde
-UYARI loglaniyor, sessizce basarili donmuyor. Bu, projenin kalan en buyuk
-parcasi; `llvm-aie` bulgusu icin `docs/03-acik-sorular.md`.
+**Durum:** yurutme iskeleti ve **paket uzunlugu cozucusu** yazildi;
+instruction seti henuz yok.
+
+AIE2 degisken uzunluklu bir VLIW: paket boyutu ilk kelimenin dusuk
+bitlerindeki onek koduyla belirtiliyor. Kodlama `Xilinx/llvm-aie`
+(`AIE2CompositeFormats.td`) icinden cikarildi:
+
+| Dusuk bitler | Paket | Bayt |
+| --- | --- | --- |
+| `0` | instr128 | 16 |
+| `101` | instr48 | 6 |
+| `0001` | instr16 | 2 |
+| `1001` | instr32 | 4 |
+| `0011` | instr64 | 8 |
+| `1011` | instr80 | 10 |
+| `0111` | instr96 | 12 |
+| `1111` | instr112 | 14 |
+
+Tam bir onek kodu; bosluk yok. `xdna_aie2_packet_size()` disariya acik ve
+`tests/test_core.c` tum bit desenlerini tek tek dogruluyor.
+
+`CORE_CONTROL` enable artik gercekten calisiyor: emulator program
+bellegini getiriyor, paketi dogru siniriyor ve slot'lari
+calistiramadigi icin **ERROR_HALT** ile duruyor. `CORE_PC`, `CORE_SP`,
+`CORE_LR` ve `CORE_STATUS` gercek register offsetlerinde okunabiliyor;
+ayrica surucuye `AIE_ERROR_INSTRUCTION` (core modulu, olay 59) asenkron
+hatasi bildiriliyor.
+
+Yani "core enable edildi ama hicbir sey olmadi" durumu bitti: hangi
+PC'de, hangi boyutta bir paketle karsilastigimiz raporlaniyor.
+
+**Kalan:** slot cozumu ve semantik. VLIW paketi icindeki alu / lda / st /
+mv slot'larinin kodlamalari `llvm-aie` TableGen'inde tam olarak var
+(`AIE2GenInstrFormats.td`, her instruction sinifi icin bit atamalari),
+ama bunlari koda donusturmek ya bir TableGen degerlendirici ya da
+`llvm-aie`'nin kendisini derleyip disassembler'ini altin standart olarak
+kullanmayi gerektiriyor.
 
 ## 8. ctrlcode motoru
 

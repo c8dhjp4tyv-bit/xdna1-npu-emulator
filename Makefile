@@ -11,7 +11,7 @@ CORE_SRC := $(wildcard src/*.c)
 CORE_OBJ := $(CORE_SRC:.c=.o)
 
 BUILD    := build
-TESTS    := $(BUILD)/test_boot $(BUILD)/test_exec
+TESTS    := $(BUILD)/test_boot $(BUILD)/test_exec $(BUILD)/test_core
 
 .PHONY: all test clean
 
@@ -35,6 +35,8 @@ test: $(TESTS)
 	@$(BUILD)/test_boot
 	@echo
 	@$(BUILD)/test_exec
+	@echo
+	@$(BUILD)/test_core
 
 clean:
 	rm -rf $(BUILD) $(CORE_OBJ) $(CORE_OBJ:.o=.d)

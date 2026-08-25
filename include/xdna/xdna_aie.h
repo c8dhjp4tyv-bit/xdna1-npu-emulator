@@ -81,6 +81,9 @@
 #define AIEML_CORE_PROG_MEM         0x00020000u
 #define AIEML_CORE_CONTROL          0x00032000u
 #define AIEML_CORE_STATUS           0x00032004u
+#define AIEML_CORE_PC               0x00031100u
+#define AIEML_CORE_SP               0x00031120u
+#define AIEML_CORE_LR               0x00031130u
 #define AIEML_CORE_DMA_BD0          0x0001D000u
 #define AIEML_CORE_DMA_S2MM0_CTRL   0x0001DE00u
 #define AIEML_CORE_DMA_MM2S0_CTRL   0x0001DE10u
@@ -257,9 +260,12 @@
 #define AIE_DMA_QUEUE_REPEAT_LSB    16u
 #define AIE_DMA_QUEUE_REPEAT_MASK   0x00FF0000u
 
-/* Core control */
+/* Core control / status -- xaiemlgbl_params.h */
 #define AIE_CORE_CTRL_ENABLE_MASK   0x00000001u
 #define AIE_CORE_CTRL_RESET_MASK    0x00000002u
+#define AIE_CORE_STAT_DEBUG_HALT    0x00010000u
+#define AIE_CORE_STAT_ERROR_HALT    0x00080000u
+#define AIE_CORE_STAT_CORE_DONE     0x00100000u
 
 /* ------------------------------------------------------------------ */
 /* Transaction (ctrlcode) formati -- xaie_txn.h + xaiegbl.h             */

@@ -117,6 +117,8 @@ void xdna_npu_get_stats(const XdnaNpu *npu, XdnaStats *out)
     if (npu->array) {
         out->dma_bytes = npu->array->stats.dma_bytes;
         out->txn_ops = npu->array->stats.txn_ops;
+        out->core_fetches = npu->array->stats.core_fetches;
+        out->core_halts = npu->array->stats.core_halts;
     }
 }
 

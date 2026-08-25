@@ -151,6 +151,9 @@ typedef struct {
 
     uint32_t core_ctrl;
     uint32_t core_status;
+    uint32_t core_pc;
+    uint32_t core_sp;
+    uint32_t core_lr;
 
     /* Stream switch */
     uint32_t ss_master[AIE_SS_MAX_PORTS];
@@ -172,6 +175,8 @@ typedef struct {
     uint64_t txn_ops;
     uint64_t stream_hops;
     uint64_t stream_drops;
+    uint64_t core_fetches;
+    uint64_t core_halts;
 } AieStats;
 
 typedef struct XdnaArray {
@@ -196,10 +201,14 @@ typedef enum {
     XDNA_ERR_DMA = 0,
     XDNA_ERR_LOCK,
     XDNA_ERR_STREAM,
+    XDNA_ERR_INSTRUCTION,
 } XdnaErrCat;
 
 void xdna_async_error(XdnaNpu *npu, uint8_t col, uint8_t row, AieTileKind kind,
                       XdnaErrCat cat);
+
+/* Compute tile yurutme cekirdegi (src/xdna_core.c) */
+void xdna_core_run(XdnaArray *arr, AieTile *t);
 
 /* ctrlcode yurutucu (src/xdna_txn.c) */
 int xdna_txn_execute(XdnaNpu *npu, uint32_t ctx_id, const uint8_t *buf,

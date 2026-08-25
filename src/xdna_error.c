@@ -69,8 +69,8 @@ static bool pick_event(AieTileKind kind, XdnaErrCat cat, uint32_t *mod,
         case XDNA_ERR_DMA:    *evt = 72; return true;
         case XDNA_ERR_LOCK:   *evt = 74; return true;
         case XDNA_ERR_STREAM: *evt = 65; return true;
+        default: return false;   /* shim'de instruction hatasi yok */
         }
-        return false;
 
     case AIE_TILE_MEM:
         *mod = AIE_MEM_MOD;
@@ -78,15 +78,21 @@ static bool pick_event(AieTileKind kind, XdnaErrCat cat, uint32_t *mod,
         case XDNA_ERR_DMA:    *evt = 133; return true;
         case XDNA_ERR_LOCK:   *evt = 139; return true;
         case XDNA_ERR_STREAM: *evt = 135; return true;
+        default: return false;   /* memory tile'da instruction hatasi yok */
         }
-        return false;
 
     default:
-        /* Compute tile: DMA ve lock bellek modulunde, stream core modulunde */
+        /*
+         * Compute tile: DMA ve lock bellek modulunde, stream ve
+         * instruction core modulunde.
+         */
         switch (cat) {
         case XDNA_ERR_DMA:    *mod = AIE_MEM_MOD;  *evt = 97;  return true;
         case XDNA_ERR_LOCK:   *mod = AIE_MEM_MOD;  *evt = 101; return true;
         case XDNA_ERR_STREAM: *mod = AIE_CORE_MOD; *evt = 56;  return true;
+        /* aie_ml_core_event_cat: 59 = AIE_ERROR_INSTRUCTION */
+        case XDNA_ERR_INSTRUCTION:
+            *mod = AIE_CORE_MOD; *evt = 59; return true;
         }
         return false;
     }

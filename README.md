@@ -62,7 +62,7 @@ Her iki testin kodu da emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 | 4. Yonetim firmware'i (MERT) | **gercek guest'te dogrulandi** |
 | 5. Bellek modeli / DMA | tile bellegi + DMA tamam, testli |
 | 6. XDNA array modeli | tamam, stream switch dahil |
-| 7. AIE instruction interpreter | **baslanmadi -- kalan asil is** |
+| 7. AIE instruction interpreter | iskelet + paket cozucu; ISA yok |
 | 8. ctrlcode motoru | tamam, testli |
 | 9. Uctan uca workload | veri hareketi calisiyor; compute eksik |
 | 10. Uyumluluk + performans | baslanmadi |
@@ -94,9 +94,13 @@ DMA ile okunuyor, XAie transaction'lari yorumlaniyor ve array uzerinde
 BD/lock/DMA islemleri gerceklesiyor. `tests/test_exec.c` bunu uctan uca
 dogruluyor (host -> memory tile -> host).
 
-Compute tile programlari **yurutulmuyor**: AIE instruction interpreter
-(asama 7) henuz yok. `CORE_CONTROL` enable yazmasi kabul ediliyor ama her
-seferinde UYARI loglaniyor -- sessizce basarili donmuyor.
+Compute tile programlari **yurutulmuyor**: AIE instruction seti (asama 7)
+henuz yok. Ama `CORE_CONTROL` enable artik gercekten calisiyor: emulator
+program bellegini getiriyor, AIE2 VLIW paketini dogru siniriyor (paket
+uzunlugu cozucusu `llvm-aie` TableGen'inden cikarildi) ve slot'lari
+calistiramadigi icin **ERROR_HALT** ile duruyor -- `CORE_PC` ve
+`CORE_STATUS` gercek registerlarda okunabiliyor, surucuye de
+`AIE_ERROR_INSTRUCTION` asenkron hatasi bildiriliyor.
 `EXECUTE_BUFFER_CF`, `CHAIN_EXEC_BUFFER_CF` ve `CHAIN_EXEC_NPU` acikca hata
 donduruyor.
 

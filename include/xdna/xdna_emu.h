@@ -94,11 +94,21 @@ typedef struct XdnaStats {
     uint64_t dma_bytes;
     uint64_t txn_ops;
     uint64_t array_errors;
+    uint64_t core_fetches;
+    uint64_t core_halts;
     uint32_t active_contexts;
     int fw_alive;
     int power_on;
 } XdnaStats;
 
 void xdna_npu_get_stats(const XdnaNpu *npu, XdnaStats *out);
+
+/*
+ * AIE2 VLIW paket uzunlugu cozucusu. Ilk 32-bit kelimeden paketin bayt
+ * cinsinden boyutunu dondurur (2,4,6,8,10,12,14,16); tanimsiz desende 0.
+ * Kodlama Xilinx/llvm-aie AIE2CompositeFormats.td'den alinmistir.
+ * Saf fonksiyon; ayri test edilebilsin diye disariya aciliyor.
+ */
+uint32_t xdna_aie2_packet_size(uint32_t first_word);
 
 #endif /* XDNA_EMU_H */
