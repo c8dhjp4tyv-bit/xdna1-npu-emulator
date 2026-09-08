@@ -7,7 +7,7 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 | --- | --- | --- |
 | 1 | PCI kabugu | **tamamlandi** -- temiz QEMU 11.1.1 agacinda `-Werror` ve gercek guest A kabul testi yesil |
 | 2 | Surucu boot'u (PSP/SMU/firmware) | **tamamlandi (gercek guest)** -- stock `amdxdna` probe'u, firmware ve `/dev/accel/accel0` yesil |
-| 3 | Guest IOMMU: SVA/PASID | **gozlemlendi** -- normal SVA/PASID ve `amdxdna.force_iova=1` yollarinin ikisi de gercek guest'te yesil |
+| 3 | Guest IOMMU: SVA/PASID | **probe/context gozlemlendi** -- normal SVA/PASID ve `amdxdna.force_iova=1` yollarinin ikisi de gercek guest'te yesil; PASID-tag'li execution DMA henuz yok |
 | 4 | Yonetim firmware'i (MERT) | **temel mesajlar ve XRT context yasam dongusu tamam, testli** |
 | 5 | Bellek modeli (BO, DMA, heap) | **baslanmadi** |
 | 6 | XDNA array mimari modeli | baslanmadi |
