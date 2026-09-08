@@ -133,7 +133,7 @@ Each run writes a timestamped evidence directory containing:
 The test records normal and force-IOVA modes separately.  It only reports
 Stage 1/2 as complete after the guest probe and XRT context checks actually
 pass.  The validated run is summarized in
-[`docs/evidence/guest-20260908T204620Z.md`](../docs/evidence/guest-20260908T204620Z.md),
+[`docs/evidence/guest-20260908T225000Z.md`](../docs/evidence/guest-20260908T225000Z.md),
 with raw artifacts under the selected local `build/guest/...` output directory.  No
 execution opcode is faked: array-dependent operations continue to return an
 explicit unsupported status until the memory/array model exists.

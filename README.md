@@ -69,12 +69,13 @@ XDNA_QEMU_BINARY=/tmp/xdna-qemu/qemu-system-x86_64 \
 
 Image, sabitlenmis Fedora container userspace'ini kullanir; stock kernel,
 `amdxdna.ko`, firmware ve XRT host'tan kopyalanir. Runner her modu ayri
-`-snapshot` boot'unda deneyip `build/guest/evidence/<timestamp>/` altinda
+`-snapshot` boot'unda deneyip secilen `build/guest/...` cikti dizininin
+`evidence/<timestamp>/` altinda
 `summary.json`, insan-okunur rapor ve ham `lspci`, `dmesg`, `xrt-smi`, QEMU
 trace ve surum kanitlarini birakir. Guest kernel'i veya driver'i degistirmez.
 
-Son dogrulama kaniti: [`docs/evidence/guest-20260908T204620Z.md`](docs/evidence/guest-20260908T204620Z.md)
-(ham artifact'lar `build/guest/audit/evidence/20260908T220931Z/` altinda,
+Son dogrulama kaniti: [`docs/evidence/guest-20260908T225000Z.md`](docs/evidence/guest-20260908T225000Z.md)
+(ham artifact'lar, kosumun sectigi yerel `build/guest/...` cikti dizininde,
 `normal/` ve `force_iova/` alt dizinlerinde).
 
 Yurutme opcode'lari (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,

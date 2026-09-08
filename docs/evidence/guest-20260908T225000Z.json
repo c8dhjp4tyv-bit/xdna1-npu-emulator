@@ -1,5 +1,5 @@
 {
-  "captured_at": "2026-09-08T22:09:31Z",
+  "captured_at": "2026-09-08T22:50:00Z",
   "qemu": {
     "version": "11.1.1",
     "commit": "c3d48b7d1e89604920e5b81b91140c2ad39a1943",
@@ -12,7 +12,7 @@
     "amdxdna": "0.10.0 (stock kernel module; initialized in dmesg)",
     "xrt": "2.26.0",
     "npu_firmware": "5.7.0.0",
-    "ssh_host_fingerprint": "SHA256:TvoHJmlEd3e1fXkfJzEacvZMO2RGvJCeJTGBX7raQQA",
+    "ssh_host_fingerprint": "SHA256:Tz4MGrSBFP8U3dQB/FOiliNc5/HZM+3WSSyZL6PHTq0",
     "driver_modified": false,
     "boot": "direct kernel; host initramfs was not readable"
   },
@@ -57,7 +57,7 @@
         "qemu_stderr": "qemu-stderr.txt",
         "versions": "versions.txt"
       },
-      "artifacts": "build/guest/audit/evidence/20260908T220931Z/normal"
+      "artifacts": "build/guest/audit/evidence/20260908T225000Z/normal"
     },
     "force_iova": {
       "overall": "pass",
@@ -99,7 +99,7 @@
         "qemu_stderr": "qemu-stderr.txt",
         "versions": "versions.txt"
       },
-      "artifacts": "build/guest/audit/evidence/20260908T220931Z/force_iova"
+      "artifacts": "build/guest/audit/evidence/20260908T225000Z/force_iova"
     }
   },
   "roadmap": {

@@ -31,7 +31,7 @@ tekrarlanan open/close ve context create/destroy ile tamamlandi.
 **Durum:** `qemu/hw/misc/xdna_npu.c`, temiz QEMU v11.1.1 agacina
 `scripts/build-qemu.sh` ile entegre edilip `-Werror` altinda derleniyor.
 Gercek guest A/B/C ve XRT D kaniti
-[`docs/evidence/guest-20260908T204620Z.md`](evidence/guest-20260908T204620Z.md)
+[`docs/evidence/guest-20260908T225000Z.md`](evidence/guest-20260908T225000Z.md)
 icindedir.
 
 ## 2. Surucu boot'u
@@ -74,7 +74,7 @@ PASID'siz `pci_dma_*` yolunda kaldi. `iommu=on amdxdna.force_iova=1` kipinde
 driver kendi IOVA domain'ini kurdu; ayni stock firmware/XRT open/context
 testleri gecti ve dmesg `Enabled force_iova mode` kaydetti. Ayrinti ve ham
 artifact yollar
-[`docs/evidence/guest-20260908T204620Z.md`](evidence/guest-20260908T204620Z.md)
+[`docs/evidence/guest-20260908T225000Z.md`](evidence/guest-20260908T225000Z.md)
 icindedir.
 
 ## 4. Yonetim firmware'i (MERT)

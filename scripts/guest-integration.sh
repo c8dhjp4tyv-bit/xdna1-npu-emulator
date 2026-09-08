@@ -502,8 +502,9 @@ EOF
         >>"$directory/ssh-endpoint.txt"
     printf 'qemu_pid_alive=%s\n' "$qemu_pid_alive" >>"$directory/ssh-endpoint.txt"
     capture_guest "$directory/prerequisites.txt" 0 \
-        'set -eu; printf "lspci: "; command -v lspci; printf "xrt-smi: "; if command -v xrt-smi >/dev/null 2>&1 || test -x /opt/xilinx/xrt/bin/xrt-smi; then command -v xrt-smi 2>/dev/null || printf "/opt/xilinx/xrt/bin/xrt-smi\n"; else echo missing; exit 127; fi; printf "amdxdna-module: "; if modinfo amdxdna >/dev/null 2>&1 || test -e /sys/module/amdxdna; then echo present; else echo missing; exit 127; fi'
-    if [[ "$(<"$directory/prerequisites.txt.rc")" != 0 ]]; then
+        'set -eu; if command -v lspci >/dev/null 2>&1; then printf "lspci: "; command -v lspci; else printf "lspci: missing\n"; exit 127; fi; printf "xrt-smi: "; if command -v xrt-smi >/dev/null 2>&1 || test -x /opt/xilinx/xrt/bin/xrt-smi; then command -v xrt-smi 2>/dev/null || printf "/opt/xilinx/xrt/bin/xrt-smi\n"; else echo missing; exit 127; fi; printf "amdxdna-module: "; if modinfo amdxdna >/dev/null 2>&1 || test -e /sys/module/amdxdna; then echo present; else echo missing; exit 127; fi'
+    prereq_rc=$(<"$directory/prerequisites.txt.rc")
+    if [[ "$prereq_rc" == 127 ]]; then
         printf 'Required guest prerequisites are unavailable; dmesg remains diagnostic-only.\n' \
             >"$directory/connection-error.txt"
         cat >"$directory/status.env" <<EOF
@@ -524,6 +525,27 @@ stage_2=pending
 stage_3_iova_pasid=unobserved
 EOF
         mode_summary "$directory"; mode_report "$directory"; cleanup_qemu; ACTIVE_QEMU_PID=; return 77
+    elif [[ "$prereq_rc" != 0 ]]; then
+        printf 'Guest prerequisite command failed with status %s; dmesg is diagnostic-only.\n' \
+            "$prereq_rc" >"$directory/connection-error.txt"
+        cat >"$directory/status.env" <<EOF
+mode=$mode
+overall=fail
+acceptance_a=fail
+acceptance_b=fail
+acceptance_c=fail
+xrt_examine=fail
+xrt_open_close=skip
+xrt_context=skip
+force_iova=not-reached
+repeat_opens=$REPEAT_OPENS
+qemu_pid_alive=$qemu_pid_alive
+suspend_resume=not-reached
+stage_1=pending
+stage_2=pending
+stage_3_iova_pasid=unobserved
+EOF
+        mode_summary "$directory"; mode_report "$directory"; cleanup_qemu; ACTIVE_QEMU_PID=; return 1
     fi
 
     capture_guest "$directory/versions.txt" 0 \
