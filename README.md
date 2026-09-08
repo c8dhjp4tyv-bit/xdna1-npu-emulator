@@ -34,6 +34,7 @@ dogrulanabiliyor.
 ```sh
 make          # build/libxdna.a
 make test     # surucu boot dizisi kosumu
+make qemu     # clean QEMU 11.1.1 integration/build (out-of-tree)
 ```
 
 `make test` stock `amdxdna` surucusunun boot dizisini birebir taklit eder --
@@ -46,13 +47,20 @@ emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 
 | Asama | Durum |
 | --- | --- |
-| 1. PCI kabugu | QEMU aygiti yazildi, **derlenmedi** (bu depoda QEMU agaci yok) |
-| 2. Surucu boot'u | cekirdek tamam, testli |
+| 1. PCI kabugu | QEMU 11.1.1'e karsilik temiz agacta derlendi (`-Werror`); gercek guest kabul testi bekliyor |
+| 2. Surucu boot'u | cekirdek tamam, `make test` ile testli; gercek guest probe'u bekliyor |
 | 3. Guest IOMMU (SVA/PASID) | plan var, bkz. acik sorular |
 | 4. Yonetim firmware'i (MERT) | temel mesajlar tamam, testli |
 | 5-10. Bellek modeli, array, ISA, ctrlcode, uctan uca | baslanmadi |
 
 Tam liste ve kabul kriterleri: [`docs/02-yol-haritasi.md`](docs/02-yol-haritasi.md).
+
+Gercek guest calistirmasi icin once [`qemu/README.md`](qemu/README.md)'deki
+`scripts/build-qemu.sh` adimini tamamlayin. Ardindan bir Linux guest disk'i
+ile `scripts/guest-integration.sh --disk <image> --mode both` calistirin.
+Runner, normal ve `amdxdna.force_iova=1` modlarini ayri snapshot boot'larinda
+deneyip `evidence/guest/<timestamp>/` altinda ham loglari ve JSON ozetini
+birakir. Guest image verilmeden bu test basari varsaymaz.
 
 Yurutme opcode'lari (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,
 `CHAIN_EXEC_*`, `SYNC_BO`) su an bilerek **acikca hata donduruyor**. XDNA

@@ -1,0 +1,45 @@
+diff --git a/hw/misc/Kconfig b/hw/misc/Kconfig
+index 1543ee6..560b9b2 100644
+--- a/hw/misc/Kconfig
++++ b/hw/misc/Kconfig
+@@ -1,5 +1,9 @@
+ config APPLESMC
+     bool
+     depends on ISA_BUS
+-
++config XDNA_NPU
++    bool
++    default y if PCI_DEVICES
++    depends on PCI && MSI_NONBROKEN
++
+ config ARMSSE_CPUID
+diff --git a/hw/misc/meson.build b/hw/misc/meson.build
+index 23265f6..bc741d1 100644
+--- a/hw/misc/meson.build
++++ b/hw/misc/meson.build
+@@ -1,2 +1,11 @@
+ system_ss.add(when: 'CONFIG_APPLESMC', if_true: files('applesmc.c'))
++system_ss.add(when: 'CONFIG_XDNA_NPU', if_true: files(
++  'xdna_npu.c',
++  'xdna/xdna_device.c',
++  'xdna/xdna_fw.c',
++  'xdna/xdna_mailbox.c',
++  'xdna/xdna_mert.c',
++  'xdna/xdna_psp.c',
++  'xdna/xdna_smu.c',
++))
+ system_ss.add(when: 'CONFIG_EDU', if_true: files('edu.c'))
+diff --git a/hw/misc/trace-events b/hw/misc/trace-events
+index c9a868b..8c4b734 100644
+--- a/hw/misc/trace-events
++++ b/hw/misc/trace-events
+@@ -443,2 +443,9 @@
+ iommu_testdev_dma_result(uint32_t result) "DMA completed result=0x%x"
+ iommu_testdev_dma_armed(bool armed) "armed=%d"
++
++# xdna_npu.c
++xdna_npu_realize(void) "realize"
++xdna_npu_reset(void) "reset"
++xdna_npu_irq(unsigned vector, unsigned msix) "raise IRQ vector %u via msix=%u"
++xdna_npu_dma_read(uint64_t addr, uint64_t len, int result) "DMA read addr=0x%" PRIx64 " len=%" PRIu64 " result=%d"
++xdna_npu_dma_write(uint64_t addr, uint64_t len, int result) "DMA write addr=0x%" PRIx64 " len=%" PRIu64 " result=%d"

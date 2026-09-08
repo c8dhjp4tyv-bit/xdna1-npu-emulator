@@ -1,0 +1,72 @@
+name: xdna1-npu-emulator CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: libxdna and tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build libxdna
+        run: make
+      - name: Run boot and error-path tests
+        run: make test
+
+  qemu-11-1-1:
+    name: QEMU v11.1.1 (warnings as errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make git ninja-build meson pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libfdt-dev libslirp-dev \
+            zlib1g-dev
+      - name: Cache QEMU source clone
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/xdna-qemu-cache
+          key: qemu-v11.1.1-${{ runner.os }}
+      - name: Build integrated QEMU
+        run: |
+          scripts/build-qemu.sh \
+            --qemu-ref v11.1.1 \
+            --cache-dir "$RUNNER_TEMP/xdna-qemu-cache" \
+            --build-dir "$RUNNER_TEMP/xdna-qemu-build" \
+            --jobs 2
+      - name: Check device registration
+        run: |
+          "$RUNNER_TEMP/xdna-qemu-build/qemu-system-x86_64" -device help \
+            | grep -E '^name "xdna-npu"'
+          "$RUNNER_TEMP/xdna-qemu-build/qemu-system-x86_64" -netdev help \
+            | grep -x user
+
+  qemu-upstream-master:
+    name: QEMU upstream/master (informational)
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc make git ninja-build meson pkg-config python3 \
+            libglib2.0-dev libpixman-1-dev libfdt-dev libslirp-dev \
+            zlib1g-dev
+      - name: Compile against upstream/master
+        run: |
+          scripts/build-qemu.sh \
+            --qemu-ref master \
+            --no-werror \
+            --cache-dir "$RUNNER_TEMP/xdna-qemu-cache-master" \
+            --build-dir "$RUNNER_TEMP/xdna-qemu-build-master" \
+            --jobs 2

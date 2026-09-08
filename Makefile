@@ -10,8 +10,9 @@ CORE_OBJ := $(CORE_SRC:.c=.o)
 
 BUILD    := build
 TESTS    := $(BUILD)/test_boot
+QEMU_SCRIPT := scripts/build-qemu.sh
 
-.PHONY: all test clean
+.PHONY: all test qemu clean
 
 all: $(BUILD)/libxdna.a
 
@@ -29,6 +30,9 @@ $(BUILD)/test_boot: tests/test_boot.c $(BUILD)/libxdna.a | $(BUILD)
 
 test: $(TESTS)
 	@$(BUILD)/test_boot
+
+qemu:
+	@$(QEMU_SCRIPT)
 
 clean:
 	rm -rf $(BUILD) $(CORE_OBJ)

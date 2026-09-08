@@ -5,8 +5,8 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 
 | # | Asama | Durum |
 | --- | --- | --- |
-| 1 | PCI kabugu | QEMU aygiti yazildi, derlenmedi |
-| 2 | Surucu boot'u (PSP/SMU/firmware) | **cekirdek tamam, testli** |
+| 1 | PCI kabugu | **QEMU 11.1.1 temiz agacinda derlendi (`-Werror`)**; gercek guest kabul testi bekliyor |
+| 2 | Surucu boot'u (PSP/SMU/firmware) | **cekirdek tamam, `make test` testli**; gercek guest probe'u bekliyor |
 | 3 | Guest IOMMU: SVA/PASID | acik problem |
 | 4 | Yonetim firmware'i (MERT) | **temel mesajlar tamam, testli** |
 | 5 | Bellek modeli (BO, DMA, heap) | baslanmadi |
@@ -23,10 +23,13 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 `1022:1502` rev `00`, BAR 0/2/4 (64-bit), MSI-X, config space.
 
 **Kabul:** guest icinde `lspci -nn` aygiti gosterir; `amdxdna` modulu
-`probe`'a girer.
+`probe`'a girer. `scripts/guest-integration.sh` bu kontrolu ve sonraki
+XRT/context kontrollerini makine-okunur kanitla birlikte yapar.
 
-**Durum:** `qemu/hw/misc/xdna_npu.c` yazildi. Bu depoda QEMU agaci
-olmadigindan **derlenmedi**; `qemu/README.md`'deki adimlarla derlenmeli.
+**Durum:** `qemu/hw/misc/xdna_npu.c`, temiz QEMU v11.1.1 agacina
+`scripts/build-qemu.sh` ile entegre edilip `-Werror` altinda derleniyor.
+Tamamlanmasi icin gercek guest'te PCI kimligi, driver probe'u ve XRT context
+yasam dongusu A/B/C kabul testi yesil olmalidir.
 
 ## 2. Surucu boot'u
 
@@ -37,8 +40,9 @@ kanalinin kurulmasi.
 olusur, `dmesg` icinde firmware ve AIE surumu gorunur.
 
 **Durum:** cekirdek tarafi tamam. `make test` -> `tests/test_boot.c`,
-surucunun boot dizisini birebir taklit ederek 1390 kontrolu geciriyor.
-Gercek guest ile dogrulama, asama 1'in derlenmesine bagli.
+surucunun boot dizisini birebir taklit ediyor. Gercek guest kaniti ve stock
+XRT sonucu `evidence/guest/<timestamp>/summary.json` icinde gorulmeden bu
+asama kapanmis sayilmaz.
 
 ## 3. Guest IOMMU: SVA/PASID
 

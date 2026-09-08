@@ -422,6 +422,13 @@ typedef struct {
 } CreateCtxResp;
 typedef struct { uint32_t context_id; } DestroyCtxReq;
 typedef struct { uint32_t context_id; uint64_t buf_addr, buf_size; } MapBufReq;
+typedef struct {
+    uint64_t dump_buff_addr;
+    uint32_t dump_buff_size;
+    uint32_t num_cols;
+    uint32_t aie_bitmap;
+} ColumnInfoReq;
+typedef struct { uint32_t status, size; } ColumnInfoResp;
 #pragma pack(pop)
 
 #define FW_PADDR (HOST_MEM_BASE + 0x10000)
@@ -636,6 +643,24 @@ static void test_boot(Host *host, XdnaNpu *npu)
         CHECK(mbox_send_recv(d, MSG_OP_EXECUTE_BUFFER_CF, req, sizeof(req),
                              &st, sizeof(st)) == 0, "execbuf cevabi");
         CHECK(st.status != 0, "execbuf sessizce basarili donmemeli");
+    }
+
+    step("DMA hatasi cevap durumuna aktarilmali");
+    {
+        ColumnInfoReq req = {
+            .dump_buff_addr = HOST_MEM_BASE + HOST_MEM_SIZE - 2,
+            .dump_buff_size = 64,
+            .num_cols = XDNA_AIE_COLS,
+            .aie_bitmap = 0,
+        };
+        ColumnInfoResp resp;
+
+        CHECK(mbox_send_recv(d, MSG_OP_QUERY_COL_STATUS, &req, sizeof(req),
+                             &resp, sizeof(resp)) == 0,
+              "kolon durumu DMA hatasi cevabi");
+        CHECK_EQ(resp.status, AIE2_STATUS_AIE_DMA_ERROR,
+                 "kolon durumu DMA hata statusu");
+        CHECK_EQ(resp.size, 0, "kolon durumu kismi boyutu");
     }
 }
 
