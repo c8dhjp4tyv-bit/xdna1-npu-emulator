@@ -58,7 +58,7 @@ jobs:
             | grep -x user
 
   qemu-upstream-master:
-    name: QEMU upstream/master (informational)
+    name: QEMU upstream/master baseline (informational)
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
@@ -70,11 +70,12 @@ jobs:
             gcc make git ninja-build meson pkg-config python3 \
             libglib2.0-dev libpixman-1-dev libfdt-dev libslirp-dev \
             zlib1g-dev
-      - name: Compile against upstream/master
+      - name: Compile upstream/master baseline
         run: |
           scripts/build-qemu.sh \
             --qemu-ref master \
             --no-werror \
+            --baseline-only \
             --cache-dir "$RUNNER_TEMP/xdna-qemu-cache-master" \
             --build-dir "$RUNNER_TEMP/xdna-qemu-build-master" \
             --jobs 2

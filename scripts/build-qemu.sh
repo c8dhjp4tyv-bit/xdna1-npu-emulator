@@ -16,6 +16,7 @@ QEMU_JOBS=${XDNA_QEMU_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '2
 QEMU_WERROR=1
 QEMU_KEEP_SOURCE=0
 QEMU_CLEAN_BUILD=0
+QEMU_INTEGRATE=1
 QEMU_CONFIGURE_ARGS=()
 
 # v11.1.1 resolves to this commit in the upstream QEMU repository. Keeping
@@ -38,6 +39,7 @@ Options:
   --jobs N              Ninja parallelism
   --configure-arg ARG   pass one additional argument to QEMU configure
   --no-werror           keep QEMU warnings enabled without promoting them to errors
+  --baseline-only       build QEMU without applying the XDNA integration (upstream smoke check)
   --keep-source         keep the temporary integrated QEMU worktree for inspection
   --clean-build         remove a previous build directory created by this script
   -h, --help            show this help
@@ -93,6 +95,10 @@ while (($#)); do
             ;;
         --no-werror)
             QEMU_WERROR=0
+            shift
+            ;;
+        --baseline-only)
+            QEMU_INTEGRATE=0
             shift
             ;;
         --keep-source)
@@ -202,19 +208,23 @@ else
     cp -a -- "$QEMU_SOURCE_ROOT"/. "$QEMU_WORKTREE"/
 fi
 
-mkdir -p -- "$QEMU_WORKTREE/hw/misc/xdna" "$QEMU_WORKTREE/include/xdna"
-cp -- "$REPO_ROOT"/src/*.c "$QEMU_WORKTREE/hw/misc/xdna/"
-cp -- "$REPO_ROOT"/src/*.h "$QEMU_WORKTREE/hw/misc/xdna/"
-cp -- "$REPO_ROOT"/include/xdna/*.h "$QEMU_WORKTREE/include/xdna/"
-cp -- "$REPO_ROOT"/qemu/hw/misc/xdna_npu.c "$QEMU_WORKTREE/hw/misc/xdna_npu.c"
+if [[ "$QEMU_INTEGRATE" == 1 ]]; then
+    mkdir -p -- "$QEMU_WORKTREE/hw/misc/xdna" "$QEMU_WORKTREE/include/xdna"
+    cp -- "$REPO_ROOT"/src/*.c "$QEMU_WORKTREE/hw/misc/xdna/"
+    cp -- "$REPO_ROOT"/src/*.h "$QEMU_WORKTREE/hw/misc/xdna/"
+    cp -- "$REPO_ROOT"/include/xdna/*.h "$QEMU_WORKTREE/include/xdna/"
+    cp -- "$REPO_ROOT"/qemu/hw/misc/xdna_npu.c "$QEMU_WORKTREE/hw/misc/xdna_npu.c"
 
-if git -C "$QEMU_WORKTREE" rev-parse --git-dir >/dev/null 2>&1; then
-    git -C "$QEMU_WORKTREE" apply --whitespace=nowarn \
-        "$REPO_ROOT/qemu/integration/qemu-11.1.1.patch"
+    if git -C "$QEMU_WORKTREE" rev-parse --git-dir >/dev/null 2>&1; then
+        git -C "$QEMU_WORKTREE" apply --whitespace=nowarn \
+            "$REPO_ROOT/qemu/integration/qemu-11.1.1.patch"
+    else
+        command -v patch >/dev/null || die "patch is required for an archive source tree"
+        patch --batch --forward -p1 -d "$QEMU_WORKTREE" < \
+            "$REPO_ROOT/qemu/integration/qemu-11.1.1.patch"
+    fi
 else
-    command -v patch >/dev/null || die "patch is required for an archive source tree"
-    patch --batch --forward -p1 -d "$QEMU_WORKTREE" < \
-        "$REPO_ROOT/qemu/integration/qemu-11.1.1.patch"
+    printf 'QEMU baseline build: skipping XDNA integration patch\n'
 fi
 
 configure_args=(
@@ -249,8 +259,10 @@ ninja -C "$QEMU_BUILD_ARG" -j"$QEMU_JOBS" qemu-system-x86_64
 
 QEMU_BINARY="$QEMU_BUILD_ARG/qemu-system-x86_64"
 [[ -x "$QEMU_BINARY" ]] || die "QEMU build did not produce qemu-system-x86_64"
-"$QEMU_BINARY" -device help | grep -qE '^name "xdna-npu"' ||
-    die "built QEMU does not register xdna-npu"
+if [[ "$QEMU_INTEGRATE" == 1 ]]; then
+    "$QEMU_BINARY" -device help | grep -qE '^name "xdna-npu"' ||
+        die "built QEMU does not register xdna-npu"
+fi
 
 printf '%s\n' \
     "XDNA_QEMU_SOURCE=$QEMU_SOURCE_ROOT" \
@@ -259,6 +271,7 @@ printf '%s\n' \
     "XDNA_QEMU_BUILD=$QEMU_BUILD_ARG" \
     "XDNA_QEMU_BINARY=$QEMU_BINARY" \
     "XDNA_QEMU_WERROR=$QEMU_WERROR" \
+    "XDNA_QEMU_INTEGRATED=$QEMU_INTEGRATE" \
     > "$QEMU_BUILD_ARG/xdna-build.env"
 
 printf 'Built QEMU: %s\n' "$QEMU_BINARY"
