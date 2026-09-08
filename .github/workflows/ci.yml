@@ -17,6 +17,14 @@ jobs:
         run: make
       - name: Run boot and error-path tests
         run: make test
+      - name: Shell and helper syntax checks
+        run: |
+          bash -n \
+            scripts/build-qemu.sh \
+            scripts/build-guest-image.sh \
+            scripts/guest-integration.sh \
+            scripts/guest-image/guest-setup.sh \
+            scripts/guest-image/make-disk.sh
 
   qemu-11-1-1:
     name: QEMU v11.1.1 (warnings as errors)

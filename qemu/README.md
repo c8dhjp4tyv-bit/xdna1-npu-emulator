@@ -52,6 +52,12 @@ The device exposes AMD vendor `1022`, device `1502`, revision `00`, 64-bit BAR
 0/2/4 and eight MSI-X vectors.  QEMU trace events are named
 `xdna_npu_*`; enable them with `-d trace:xdna_npu_* -D xdna-qemu.log`.
 
+The PCIe wrapper also publishes the ATS, PASID and PRI extended capabilities
+used by the stock amdxdna SVA path.  The QEMU 11.1.1 integration patch adds
+the Intel VT-d `SMPWC` ECAP only when `intel-iommu,svm=on` is requested;
+QEMU's emulated RAM is coherent, so this is the compatibility bit required by
+Linux SVM.  It is an integration fix in QEMU, not a guest-driver change.
+
 The wrapper's lifetime rules are deliberate: each BAR callback context is
 embedded in the QOM object (no per-BAR heap leak), the core is freed on every
 realize failure and exactly once from `exit`, and `msix_initialized` guards
@@ -61,9 +67,21 @@ assertion.
 
 ## Guest integration
 
-`scripts/guest-integration.sh` boots a user-supplied guest disk over QEMU user
-networking and collects evidence.  It intentionally does not alter the guest
-kernel or driver.  A typical invocation is:
+`scripts/build-guest-image.sh` builds a disposable raw Fedora image from a
+pinned userspace base and copies in the selected host kernel, signed stock
+`amdxdna.ko`, firmware, XRT userspace and DRM UAPI headers.  This avoids a
+manually maintained VM disk; the runner opens the image with `-snapshot`.
+
+```sh
+scripts/build-guest-image.sh
+set -a; . build/guest/guest.env; set +a
+XDNA_QEMU_BINARY=/tmp/xdna-qemu/qemu-system-x86_64 \
+  scripts/guest-integration.sh --mode both --debug-driver
+```
+
+Alternatively, `scripts/guest-integration.sh` boots a user-supplied guest
+disk over QEMU user networking and collects evidence.  It intentionally does
+not alter the guest kernel or driver.  A typical invocation is:
 
 ```sh
 scripts/guest-integration.sh \
@@ -81,7 +99,10 @@ Use `--mode force_iova` (or the default `--mode both`) for the supported
 the stock module with `modprobe amdxdna force_iova=1`; it does not patch
 `amdxdna`.  For direct kernel boot, pass `--kernel`, optionally `--initrd`,
 and `--append`; the runner adds `amdxdna.force_iova=1` to the force-IOVA
-mode's command line automatically.
+mode's command line automatically.  `--iommu intel` (the default) exposes
+the SVA-capable Intel VT-d configuration; `--iommu none`, `amd` and `virtio`
+are available for compatibility experiments.  `--pci-device` selects the
+BDF used by the detailed PCI and XRT captures.
 The guest must provide `lspci`, `dmesg`, stock `amdxdna`, and `xrt-smi`; the
 script exits with status 77 when required guest inputs are absent.
 
@@ -96,5 +117,8 @@ Each run writes a timestamped evidence directory containing:
 
 The test records normal and force-IOVA modes separately.  It only reports
 Stage 1/2 as complete after the guest probe and XRT context checks actually
-pass.  No execution opcode is faked: array-dependent operations continue to
-return an explicit unsupported status until the memory/array model exists.
+pass.  The validated run is summarized in
+[`docs/evidence/guest-20260908T204620Z.md`](../docs/evidence/guest-20260908T204620Z.md),
+with raw artifacts under the local `build/guest/evidence-*` directories.  No
+execution opcode is faked: array-dependent operations continue to return an
+explicit unsupported status until the memory/array model exists.

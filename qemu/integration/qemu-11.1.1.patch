@@ -33,7 +33,7 @@ diff --git a/hw/misc/trace-events b/hw/misc/trace-events
 index c9a868b..8c4b734 100644
 --- a/hw/misc/trace-events
 +++ b/hw/misc/trace-events
-@@ -443,2 +443,9 @@
+@@ -443,2 +443,10 @@
  iommu_testdev_dma_result(uint32_t result) "DMA completed result=0x%x"
  iommu_testdev_dma_armed(bool armed) "armed=%d"
 +
@@ -42,4 +42,33 @@ index c9a868b..8c4b734 100644
 +xdna_npu_reset(void) "reset"
 +xdna_npu_irq(unsigned vector, unsigned msix) "raise IRQ vector %u via msix=%u"
 +xdna_npu_dma_read(uint64_t addr, uint64_t len, int result) "DMA read addr=0x%" PRIx64 " len=%" PRIu64 " result=%d"
++xdna_npu_dma_phys_read(uint64_t addr, uint64_t len, int result) "DMA physical read addr=0x%" PRIx64 " len=%" PRIu64 " result=%d"
 +xdna_npu_dma_write(uint64_t addr, uint64_t len, int result) "DMA write addr=0x%" PRIx64 " len=%" PRIu64 " result=%d"
+diff --git a/hw/i386/intel_iommu_internal.h b/hw/i386/intel_iommu_internal.h
+--- a/hw/i386/intel_iommu_internal.h
++++ b/hw/i386/intel_iommu_internal.h
+@@ -199,6 +199,7 @@
+ #define VTD_ECAP_GET_PSS(ecap)      extract64(ecap, 35, 5)
+ #define VTD_ECAP_PASID              (1ULL << 40)
+ #define VTD_ECAP_PDS                (1ULL << 42)
+ #define VTD_ECAP_SMTS               (1ULL << 43)
++#define VTD_ECAP_SMPWC              (1ULL << 48)
+ #define VTD_ECAP_SSTS               (1ULL << 46)
+ #define VTD_ECAP_FSTS               (1ULL << 47)
+diff --git a/hw/i386/intel_iommu.c b/hw/i386/intel_iommu.c
+index 82c3c3b2c35f..9e74a543a162 100644
+--- a/hw/i386/intel_iommu.c
++++ b/hw/i386/intel_iommu.c
+@@ -5040,6 +5040,12 @@ static void vtd_cap_init(IntelIOMMUState *s)
+         s->ecap |= VTD_ECAP_SC;
+     }
+ 
++    /* QEMU's emulated memory is coherent; expose that guarantee to guest
++     * Intel SVM when the vIOMMU SVM mode is explicitly enabled. */
++    if (s->svm) {
++        s->ecap |= VTD_ECAP_SMPWC;
++    }
++
+     if (s->pasid) {
+         VTD_ECAP_SET_PSS(s, s->pasid - 1);
+         s->ecap |= VTD_ECAP_PASID;

@@ -12,9 +12,12 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/pci/pci_device.h"
+#include "hw/pci/pcie.h"
 #include "hw/pci/msix.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
+#include "system/address-spaces.h"
+#include "system/memory.h"
 #include "trace.h"
 
 #include "xdna/xdna_emu.h"
@@ -30,6 +33,11 @@ OBJECT_DECLARE_SIMPLE_TYPE(XdnaNpuState, XDNA_NPU)
  */
 #define XDNA_MSIX_TABLE_OFFSET 0x40000
 #define XDNA_MSIX_PBA_OFFSET   0x50000
+
+/* Optional PCIe extended capabilities used by the guest SVA path. */
+#define XDNA_ATS_CAP_OFFSET    0x100
+#define XDNA_PASID_CAP_OFFSET  0x110
+#define XDNA_PRI_CAP_OFFSET    0x120
 
 typedef struct XdnaBarCtx {
     struct XdnaNpuState *s;
@@ -64,6 +72,25 @@ static int xdna_host_dma_read(void *opaque, uint64_t addr, void *buf,
     if (result != MEMTX_OK) {
         qemu_log_mask(LOG_GUEST_ERROR,
                       "xdna-npu: DMA read failed at 0x%" PRIx64
+                      " (len=%zu, result=%d)\n", addr, len, result);
+        return -1;
+    }
+    return 0;
+}
+
+static int xdna_host_dma_read_phys(void *opaque, uint64_t addr, void *buf,
+                                   size_t len)
+{
+    XdnaNpuState *s = opaque;
+    MemTxResult result;
+
+    (void)s;
+    result = address_space_read(&address_space_memory, addr,
+                                MEMTXATTRS_UNSPECIFIED, buf, len);
+    trace_xdna_npu_dma_phys_read(addr, len, result);
+    if (result != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "xdna-npu: physical DMA read failed at 0x%" PRIx64
                       " (len=%zu, result=%d)\n", addr, len, result);
         return -1;
     }
@@ -117,6 +144,7 @@ static void xdna_host_log(void *opaque, int level, const char *msg)
 
 static const XdnaHostOps xdna_host_ops = {
     .dma_read = xdna_host_dma_read,
+    .dma_read_phys = xdna_host_dma_read_phys,
     .dma_write = xdna_host_dma_write,
     .raise_irq = xdna_host_raise_irq,
     .log = xdna_host_log,
@@ -237,7 +265,19 @@ static void xdna_npu_realize(PCIDevice *pdev, Error **errp)
         s->msix_initialized = false;
         xdna_npu_free(s->emu);
         s->emu = NULL;
+        return;
     }
+
+    /*
+     * amdxdna's normal (non-force_iova) client path asks the guest IOMMU for
+     * SVA/PASID. Advertise the endpoint capabilities that a physical XDNA1
+     * function exposes so an upstream VT-d guest can take that path. QEMU
+     * owns the config-space capability registers; libxdna remains unaware of
+     * PCIe and continues to use only the host callbacks above.
+     */
+    pcie_ats_init(pdev, XDNA_ATS_CAP_OFFSET, true);
+    pcie_pasid_init(pdev, XDNA_PASID_CAP_OFFSET, 20, false, false);
+    pcie_pri_init(pdev, XDNA_PRI_CAP_OFFSET, 32, true);
 }
 
 static void xdna_npu_exit(PCIDevice *pdev)

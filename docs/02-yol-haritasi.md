@@ -5,11 +5,11 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 
 | # | Asama | Durum |
 | --- | --- | --- |
-| 1 | PCI kabugu | **QEMU 11.1.1 temiz agacinda derlendi (`-Werror`)**; gercek guest kabul testi bekliyor |
-| 2 | Surucu boot'u (PSP/SMU/firmware) | **cekirdek tamam, `make test` testli**; gercek guest probe'u bekliyor |
-| 3 | Guest IOMMU: SVA/PASID | acik problem |
-| 4 | Yonetim firmware'i (MERT) | **temel mesajlar tamam, testli** |
-| 5 | Bellek modeli (BO, DMA, heap) | baslanmadi |
+| 1 | PCI kabugu | **tamamlandi** -- temiz QEMU 11.1.1 agacinda `-Werror` ve gercek guest A kabul testi yesil |
+| 2 | Surucu boot'u (PSP/SMU/firmware) | **tamamlandi (gercek guest)** -- stock `amdxdna` probe'u, firmware ve `/dev/accel/accel0` yesil |
+| 3 | Guest IOMMU: SVA/PASID | **gozlemlendi** -- normal SVA/PASID ve `amdxdna.force_iova=1` yollarinin ikisi de gercek guest'te yesil |
+| 4 | Yonetim firmware'i (MERT) | **temel mesajlar ve XRT context yasam dongusu tamam, testli** |
+| 5 | Bellek modeli (BO, DMA, heap) | **baslanmadi** |
 | 6 | XDNA array mimari modeli | baslanmadi |
 | 7 | AIE instruction interpreter | acik problem |
 | 8 | ctrlcode motoru | baslanmadi |
@@ -24,12 +24,15 @@ degil; bir asama ancak kendi testi yesil oldugunda kapanir.
 
 **Kabul:** guest icinde `lspci -nn` aygiti gosterir; `amdxdna` modulu
 `probe`'a girer. `scripts/guest-integration.sh` bu kontrolu ve sonraki
-XRT/context kontrollerini makine-okunur kanitla birlikte yapar.
+XRT/context kontrollerini makine-okunur kanitla birlikte yapar. Bu kabul
+gercek guest'te `1022:1502 rev 00`, stock driver binding, `xrt-smi examine`,
+tekrarlanan open/close ve context create/destroy ile tamamlandi.
 
 **Durum:** `qemu/hw/misc/xdna_npu.c`, temiz QEMU v11.1.1 agacina
 `scripts/build-qemu.sh` ile entegre edilip `-Werror` altinda derleniyor.
-Tamamlanmasi icin gercek guest'te PCI kimligi, driver probe'u ve XRT context
-yasam dongusu A/B/C kabul testi yesil olmalidir.
+Gercek guest A/B/C ve XRT D kaniti
+[`docs/evidence/guest-20260908T204620Z.md`](evidence/guest-20260908T204620Z.md)
+icindedir.
 
 ## 2. Surucu boot'u
 
@@ -39,10 +42,10 @@ kanalinin kurulmasi.
 **Kabul:** stock `amdxdna` probe'u hatasiz tamamlanir, `/dev/accel/accel0`
 olusur, `dmesg` icinde firmware ve AIE surumu gorunur.
 
-**Durum:** cekirdek tarafi tamam. `make test` -> `tests/test_boot.c`,
-surucunun boot dizisini birebir taklit ediyor. Gercek guest kaniti ve stock
-XRT sonucu `evidence/guest/<timestamp>/summary.json` icinde gorulmeden bu
-asama kapanmis sayilmaz.
+**Durum:** cekirdek tarafi ve gercek guest tarafi tamam. `make test` ->
+`tests/test_boot.c`, surucunun boot dizisini birebir taklit ediyor. Stock
+`amdxdna` 0.10.0 probe'u firmware'i yukledi, `/dev/accel/accel0` olustu ve
+stock XRT 2.26.0 `xrt-smi examine` ile cihazi gordu.
 
 ## 3. Guest IOMMU: SVA/PASID
 
@@ -56,7 +59,19 @@ guest amdxdna -> guest SVA -> sanal AMD IOMMU -> QEMU
 Ayrintili degerlendirme: `docs/03-acik-sorular.md`.
 
 **Kabul:** guest'te `iommu_sva_bind_device()` gercekten basarili doner ve
-her process kendi PASID'i ile ayri context alir.
+her process kendi PASID'i ile ayri context alir. Ayrica `force_iova=1`
+uyumluluk yolu stock driver degistirilmeden calisir.
+
+**Gozlenen sonuc (QEMU 11.1.1):** Normal kipte Intel VT-d SVM (`svm=on`,
+PASID/ATS/PRI ve coherent SVM ECAP) ile stock driver SVA yoluna girdi; PCI
+config space'te ATS/PASID/PRI capability'leri ve MERT context kayitlarinda
+`pasid 1` goruldu. PSP firmware dogrulamasi icin `virt_to_phys()` tamponu
+QEMU'nun fiziksel DMA callback'i ile okundu, diger DMA `pci_dma_*` yolunda
+kaldi. `iommu=on amdxdna.force_iova=1` kipinde driver kendi IOVA domain'ini
+kurdu; ayni stock firmware/XRT open/context testleri gecti ve dmesg
+`Enabled force_iova mode` kaydetti. Ayrinti ve ham artifact yollar
+[`docs/evidence/guest-20260908T204620Z.md`](evidence/guest-20260908T204620Z.md)
+icindedir.
 
 ## 4. Yonetim firmware'i (MERT)
 
@@ -76,10 +91,14 @@ Yurutme opcode'lari (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,
 `CHAIN_EXEC_*`, `SYNC_BO`) bilerek **acikca hata donduruyor** -- sessizce
 "basarili" demek yanlis sonuc uretirdi.
 
-## 5. Bellek modeli
+## 5. Bellek modeli (baslanmadi)
 
 BO'lar, adres cevirisi, instruction buffer (context basina 64 MB host
 tamponu), host bellegine DMA, memory tile'lar.
+
+Bu asama henuz baslatilmadi. Yurutme ve `SYNC_BO` opcode'lari bellek/array
+modeli hazir olana kadar basarisiz donmeye devam eder; guest probe'u ve XRT
+context yasam dongusunun gecmesi bu asamayi otomatik olarak baslatmaz.
 
 **Kabul:** guest'ten yazilan bir BO'nun icerigi emulator tarafindan dogru
 okunur; `SYNC_BO` her iki yonde dogru calisir.

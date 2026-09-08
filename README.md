@@ -47,20 +47,35 @@ emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 
 | Asama | Durum |
 | --- | --- |
-| 1. PCI kabugu | QEMU 11.1.1'e karsilik temiz agacta derlendi (`-Werror`); gercek guest kabul testi bekliyor |
-| 2. Surucu boot'u | cekirdek tamam, `make test` ile testli; gercek guest probe'u bekliyor |
-| 3. Guest IOMMU (SVA/PASID) | plan var, bkz. acik sorular |
+| 1. PCI kabugu | **tamamlandi** -- temiz QEMU 11.1.1 agacinda `-Werror` ve gercek guest A kabul testi yesil |
+| 2. Surucu boot'u | **tamamlandi (gercek guest)** -- stock `amdxdna` probe'u, firmware boot'u ve `/dev/accel/accel0` yesil |
+| 3. Guest IOMMU (SVA/PASID) | **gozlemlendi** -- normal SVA/PASID ve `force_iova=1` yollarinin ikisi de gercek guest'te yesil |
 | 4. Yonetim firmware'i (MERT) | temel mesajlar tamam, testli |
-| 5-10. Bellek modeli, array, ISA, ctrlcode, uctan uca | baslanmadi |
+| 5-10. Bellek modeli, array, ISA, ctrlcode, uctan uca | **baslanmadi** |
 
 Tam liste ve kabul kriterleri: [`docs/02-yol-haritasi.md`](docs/02-yol-haritasi.md).
 
 Gercek guest calistirmasi icin once [`qemu/README.md`](qemu/README.md)'deki
-`scripts/build-qemu.sh` adimini tamamlayin. Ardindan bir Linux guest disk'i
-ile `scripts/guest-integration.sh --disk <image> --mode both` calistirin.
-Runner, normal ve `amdxdna.force_iova=1` modlarini ayri snapshot boot'larinda
-deneyip `evidence/guest/<timestamp>/` altinda ham loglari ve JSON ozetini
-birakir. Guest image verilmeden bu test basari varsaymaz.
+`scripts/build-qemu.sh` adimini tamamlayin. Tekrarlanabilir, disposable bir
+guest image'i host'un sectigi cekirdek/modul/firmware/XRT yiginindan su sekilde
+olusturabilirsiniz:
+
+```sh
+scripts/build-guest-image.sh
+set -a; . build/guest/guest.env; set +a
+XDNA_QEMU_BINARY=/tmp/xdna-qemu/qemu-system-x86_64 \
+  scripts/guest-integration.sh --mode both --debug-driver
+```
+
+Image, sabitlenmis Fedora container userspace'ini kullanir; stock kernel,
+`amdxdna.ko`, firmware ve XRT host'tan kopyalanir. Runner her modu ayri
+`-snapshot` boot'unda deneyip `build/guest/evidence/<timestamp>/` altinda
+`summary.json`, insan-okunur rapor ve ham `lspci`, `dmesg`, `xrt-smi`, QEMU
+trace ve surum kanitlarini birakir. Guest kernel'i veya driver'i degistirmez.
+
+Son dogrulama kaniti: [`docs/evidence/guest-20260908T204620Z.md`](docs/evidence/guest-20260908T204620Z.md)
+(ham artifact'lar `build/guest/evidence-both-translated/20260908T204620Z/`
+altinda, `normal/` ve `force_iova/` alt dizinlerinde).
 
 Yurutme opcode'lari (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,
 `CHAIN_EXEC_*`, `SYNC_BO`) su an bilerek **acikca hata donduruyor**. XDNA

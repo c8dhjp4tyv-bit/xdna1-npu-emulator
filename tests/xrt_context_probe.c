@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <drm/amdxdna_accel.h>
@@ -47,7 +48,7 @@ static int close_gem(int fd, uint32_t handle)
     return 0;
 }
 
-static int create_context_once(const char *device_path)
+static int create_context_once(const char *device_path, unsigned iteration)
 {
     struct amdxdna_drm_create_bo bo = {
         .size = DEV_HEAP_SIZE,
@@ -68,6 +69,8 @@ static int create_context_once(const char *device_path)
     int ret = -1;
     int saved_errno;
     int bo_created = 0;
+    void *heap_map = MAP_FAILED;
+    struct amdxdna_drm_get_bo_info heap_info = { 0 };
 
     fd = open(device_path, O_RDWR | O_CLOEXEC);
     if (fd < 0) {
@@ -81,15 +84,34 @@ static int create_context_once(const char *device_path)
         goto out_close;
     }
     bo_created = 1;
-    printf("dev_heap_create=ok handle=%" PRIu32 " size=%" PRIu64 "\n",
-           bo.handle, (uint64_t)DEV_HEAP_SIZE);
+    printf("context_iteration[%u]=begin\n", iteration);
+    printf("dev_heap_create[%u]=ok handle=%" PRIu32 " size=%" PRIu64 "\n",
+           iteration, bo.handle, (uint64_t)DEV_HEAP_SIZE);
+
+    heap_info.handle = bo.handle;
+    if (ioctl(fd, DRM_IOCTL_AMDXDNA_GET_BO_INFO, &heap_info) < 0) {
+        print_errno("DRM_IOCTL_AMDXDNA_GET_BO_INFO (dev heap)");
+        goto out_bo;
+    }
+    if (heap_info.map_offset == AMDXDNA_INVALID_ADDR) {
+        fprintf(stderr, "dev heap has no mmap offset\n");
+        goto out_bo;
+    }
+    heap_map = mmap(NULL, DEV_HEAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
+                    fd, (off_t)heap_info.map_offset);
+    if (heap_map == MAP_FAILED) {
+        print_errno("mmap dev heap");
+        goto out_bo;
+    }
+    printf("dev_heap_mmap[%u]=ok addr=%p size=%" PRIu64 "\n", iteration,
+           heap_map, (uint64_t)DEV_HEAP_SIZE);
 
     if (ioctl(fd, DRM_IOCTL_AMDXDNA_CREATE_HWCTX, &context) < 0) {
         print_errno("DRM_IOCTL_AMDXDNA_CREATE_HWCTX");
         goto out_bo;
     }
-    printf("context_create=ok handle=%" PRIu32 " syncobj=%" PRIu32
-           " doorbell=%" PRIu32 "\n", context.handle,
+    printf("context_create[%u]=ok handle=%" PRIu32 " syncobj=%" PRIu32
+           " doorbell=%" PRIu32 "\n", iteration, context.handle,
            context.syncobj_handle, context.umq_doorbell);
 
     destroy.handle = context.handle;
@@ -97,11 +119,16 @@ static int create_context_once(const char *device_path)
         print_errno("DRM_IOCTL_AMDXDNA_DESTROY_HWCTX");
         goto out_bo;
     }
-    printf("context_destroy=ok handle=%" PRIu32 "\n", context.handle);
+    printf("context_destroy[%u]=ok handle=%" PRIu32 "\n", iteration,
+           context.handle);
     ret = 0;
 
 out_bo:
     saved_errno = errno;
+    if (heap_map != MAP_FAILED && munmap(heap_map, DEV_HEAP_SIZE) < 0 && ret == 0) {
+        print_errno("munmap dev heap");
+        ret = -1;
+    }
     if (bo_created && close_gem(fd, bo.handle) < 0 && ret == 0) {
         ret = -1;
     }
@@ -169,11 +196,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "xrt_open_close=fail\n");
         return 1;
     }
-    ret = create_context_once(device_path);
-    if (ret < 0) {
-        fprintf(stderr, "context_lifetime=fail\n");
-        return 1;
+    for (unsigned i = 0; i < repeats; ++i) {
+        ret = create_context_once(device_path, i);
+        if (ret < 0) {
+            fprintf(stderr, "context_lifetime=fail iteration=%u\n", i);
+            return 1;
+        }
     }
-    printf("context_lifetime=ok\n");
+    printf("context_lifetime=ok iterations=%u\n", repeats);
     return 0;
 }

@@ -30,9 +30,12 @@ BOOT_TIMEOUT=$(env_or XDNA_GUEST_BOOT_TIMEOUT "180")
 REPEAT_OPENS=$(env_or XDNA_GUEST_REPEAT_OPENS "3")
 EVIDENCE_ROOT=$(env_or XDNA_GUEST_EVIDENCE "$REPO_ROOT/evidence/guest")
 MODE=$(env_or XDNA_GUEST_MODE "both")
+IOMMU=$(env_or XDNA_GUEST_IOMMU "intel")
+PCI_DEVICE=$(env_or XDNA_GUEST_PCI_DEVICE "0000:00:02.0")
 HELPER_SOURCE=$(env_or XDNA_XRT_HELPER_SOURCE "$REPO_ROOT/tests/xrt_context_probe.c")
 HELPER_REMOTE=$(env_or XDNA_XRT_HELPER "")
 ATTEMPT_SUSPEND=0
+DEBUG_DRIVER=$(env_or XDNA_GUEST_DEBUG_DRIVER "0")
 QEMU_EXTRA=()
 
 usage() {
@@ -60,8 +63,11 @@ the guest driver and kernel are never modified. The default runs both modes.
   --boot-timeout SEC   SSH timeout (default: 180)
   --repeat-opens N     XRT open/close iterations (default: 3)
   --evidence-dir PATH  evidence root (default: evidence/guest)
+  --iommu MODE         none, intel, amd, or virtio (default: intel)
+  --pci-device BDF     XDNA PCI address for xrt-smi (default: 0000:00:02.0)
   --xrt-helper PATH    already-built helper path inside the guest
   --helper-source PATH upload/build helper (default: tests/xrt_context_probe.c)
+  --debug-driver       enable amdxdna dynamic-debug messages in the guest
   --suspend-resume     attempt system suspend/resume (optional and disruptive)
   --qemu-arg ARG       append one extra QEMU argument (repeatable)
   -h, --help           show this help
@@ -95,8 +101,11 @@ while (($#)); do
         --boot-timeout) (($# >= 2)) || die "--boot-timeout needs seconds"; BOOT_TIMEOUT=$2; shift 2 ;;
         --repeat-opens) (($# >= 2)) || die "--repeat-opens needs a count"; REPEAT_OPENS=$2; shift 2 ;;
         --evidence-dir) (($# >= 2)) || die "--evidence-dir needs a path"; EVIDENCE_ROOT=$2; shift 2 ;;
+        --iommu) (($# >= 2)) || die "--iommu needs a mode"; IOMMU=$2; shift 2 ;;
+        --pci-device) (($# >= 2)) || die "--pci-device needs a BDF"; PCI_DEVICE=$2; shift 2 ;;
         --xrt-helper) (($# >= 2)) || die "--xrt-helper needs a guest path"; HELPER_REMOTE=$2; shift 2 ;;
         --helper-source) (($# >= 2)) || die "--helper-source needs a local path"; HELPER_SOURCE=$2; shift 2 ;;
+        --debug-driver) DEBUG_DRIVER=1; shift ;;
         --suspend-resume) ATTEMPT_SUSPEND=1; shift ;;
         --qemu-arg) (($# >= 2)) || die "--qemu-arg needs an argument"; QEMU_EXTRA+=("$2"); shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -109,6 +118,11 @@ case "$MODE" in
     force_iova) MODES=(force_iova) ;;
     both) MODES=(normal force_iova) ;;
     *) die "--mode must be normal, force_iova, or both" ;;
+esac
+
+case "$IOMMU" in
+    none|intel|amd|virtio) ;;
+    *) die "--iommu must be none, intel, amd, or virtio" ;;
 esac
 
 command -v python3 >/dev/null || die "python3 is required"
@@ -309,12 +323,35 @@ run_mode() {
         -m "$MEMORY" -smp "$SMP" -serial "file:$directory/qemu-serial.log"
         -D "$directory/qemu.log" -d 'guest_errors,trace:xdna_npu_*' -snapshot
     )
+    case "$IOMMU" in
+        intel)
+            # amdxdna needs a guest IOMMU domain and PASID/SVA-capable
+            # translation.  Scalable VT-d exposes that path to stock Linux.
+            qemu_args+=(-device
+                'intel-iommu,intremap=on,device-iotlb=on,caching-mode=on,svm=on,pasid-bits=20,scalable-mode=on,fsts=on')
+            ;;
+        amd) qemu_args+=(-device amd-iommu,intremap=on) ;;
+        virtio) qemu_args+=(-device virtio-iommu-pci) ;;
+        none) ;;
+    esac
     [[ -z "$QEMU_FIRMWARE_DIR" ]] || qemu_args=(-L "$QEMU_FIRMWARE_DIR" "${qemu_args[@]}")
     [[ -z "$QEMU_BIOS" ]] || qemu_args=(-bios "$QEMU_BIOS" "${qemu_args[@]}")
     if [[ -n "$KERNEL_IMAGE" ]]; then
         qemu_args+=(-kernel "$KERNEL_IMAGE")
         [[ -z "$INITRD_IMAGE" ]] || qemu_args+=(-initrd "$INITRD_IMAGE")
         local kernel_append=$KERNEL_APPEND
+        if [[ "$IOMMU" == intel && "$kernel_append" != *intel_iommu=* ]]; then
+            [[ -z "$kernel_append" ]] || kernel_append+=" "
+            kernel_append+="intel_iommu=on,sm_on"
+        fi
+        if [[ "$IOMMU" == intel && "$kernel_append" != iommu=* &&
+              "$kernel_append" != *' iommu='* ]]; then
+            # The amdxdna PSP passes firmware buffers as virt_to_phys().  A
+            # translated vIOMMU therefore faults before probe; passthrough is
+            # the reproducible compatibility mode for this stock driver.
+            [[ -z "$kernel_append" ]] || kernel_append+=" "
+            kernel_append+="iommu=pt"
+        fi
         if [[ "$mode" == force_iova ]]; then
             if [[ -n "$kernel_append" ]]; then kernel_append+=" "; fi
             kernel_append+="amdxdna.force_iova=1"
@@ -391,8 +428,10 @@ EOF
         printf 'module-parameter: normal (force_iova not requested)\n' >"$directory/force-iova.txt"
     fi
 
-    capture_guest "$directory/lspci.txt" 0 'lspci -Dnnk 2>&1; printf "\n--- verbose ---\n"; lspci -Dvmmnnk 2>&1 || true'
-    if grep -Eiq '1022:1502.*\(rev[[:space:]]*00\)' "$directory/lspci.txt"; then
+    capture_guest "$directory/lspci.txt" 0 \
+        "lspci -Dnnk 2>&1; printf '\n--- verbose ---\n'; lspci -Dvmmnnk 2>&1 || true; printf '\n--- capabilities ---\n'; lspci -Dvvnnk -s '$PCI_DEVICE' 2>&1 || true; printf '\n--- config revision ---\n'; printf 'setpci-revision: '; setpci -s '$PCI_DEVICE' REVISION 2>&1 || true; printf 'sysfs-revision: '; od -An -tx1 -j8 -N1 /sys/bus/pci/devices/'$PCI_DEVICE'/config 2>&1 | tr -d ' \n'; printf '\n--- config space ---\n'; od -Ax -tx1 -v /sys/bus/pci/devices/'$PCI_DEVICE'/config 2>&1 || true"
+    if grep -Eiq '1022:1502.*\(rev[[:space:]]*00\)' "$directory/lspci.txt" ||
+       grep -Eiq 'setpci-revision:[[:space:]]*00|sysfs-revision:[[:space:]]*00' "$directory/lspci.txt"; then
         acceptance_a=pass; printf 'PASS: 1022:1502 revision 00\n' >"$directory/lspci-check.txt"
     elif grep -Eiq '1022:1502' "$directory/lspci.txt"; then
         printf 'FAIL: device ID found but revision 00 was not observed\n' >"$directory/lspci-check.txt"
@@ -416,10 +455,10 @@ EOF
     fi
 
     capture_guest "$directory/xrt-smi.txt" 0 \
-        'if command -v xrt-smi >/dev/null 2>&1; then xrt-smi --batch examine --report all; elif [ -x /opt/xilinx/xrt/bin/xrt-smi ]; then /opt/xilinx/xrt/bin/xrt-smi --batch examine --report all; else echo xrt-smi-missing; exit 127; fi'
+        "if command -v xrt-smi >/dev/null 2>&1; then xrt-smi --batch examine --device '$PCI_DEVICE' --report all; elif [ -x /opt/xilinx/xrt/bin/xrt-smi ]; then /opt/xilinx/xrt/bin/xrt-smi --batch examine --device '$PCI_DEVICE' --report all; else echo xrt-smi-missing; exit 127; fi"
     [[ "$(<"$directory/xrt-smi.txt.rc")" == 0 ]] && xrt_examine=pass || true
     capture_guest "$directory/xrt-smi.json" 0 \
-        'if command -v xrt-smi >/dev/null 2>&1; then xrt-smi --batch examine --report all -f JSON; elif [ -x /opt/xilinx/xrt/bin/xrt-smi ]; then /opt/xilinx/xrt/bin/xrt-smi --batch examine --report all -f JSON; else echo xrt-smi-missing; exit 127; fi'
+        "if command -v xrt-smi >/dev/null 2>&1; then xrt-smi --batch examine --device '$PCI_DEVICE' --report all -f JSON; elif [ -x /opt/xilinx/xrt/bin/xrt-smi ]; then /opt/xilinx/xrt/bin/xrt-smi --batch examine --device '$PCI_DEVICE' --report all -f JSON; else echo xrt-smi-missing; exit 127; fi"
 
     capture_guest "$directory/iova-pasid.txt" 1 \
         'printf "cmdline:\n"; cat /proc/cmdline; printf "force_iova:\n"; cat /sys/module/amdxdna/parameters/force_iova 2>&1 || true; printf "dmesg-iova-pasid:\n"; dmesg --color=never 2>&1 | grep -iE "iova|pasid|sva|iommu|force_iova" || true'
@@ -448,13 +487,21 @@ EOF
             guest_exec "cc -std=c11 -Wall -Wextra -Werror -I/opt/xilinx/xrt/include -I/usr/include '$helper_src' -L/opt/xilinx/xrt/lib64 -Wl,-rpath,/opt/xilinx/xrt/lib64 -lxrt_coreutil -o '$helper_bin'" >>"$directory/xrt-helper-build.txt" 2>&1
             helper_build_rc=$?
             if ((helper_build_rc != 0)); then
-                guest_exec "cc -std=c11 -Wall -Wextra -Werror -I/usr/include '$helper_src' -L/usr/lib64 -L/usr/lib -lxrt_coreutil -o '$helper_bin'" >>"$directory/xrt-helper-build.txt" 2>&1
+                guest_exec "cc -std=c11 -Wall -Wextra -Werror -I/opt/xilinx/xrt/include -I/usr/include '$helper_src' -L/usr/lib64 -L/usr/lib -L/opt/xilinx/xrt/lib64 -Wl,-rpath,/opt/xilinx/xrt/lib64 -lxrt_coreutil -o '$helper_bin'" >>"$directory/xrt-helper-build.txt" 2>&1
                 helper_build_rc=$?
             fi
             set -e
         fi
     fi
     if ((helper_build_rc == 0)); then
+        if [[ "$DEBUG_DRIVER" == 1 ]]; then
+            capture_guest "$directory/amdxdna-dynamic-debug.txt" 1 \
+                'if test -d /sys/kernel/debug; then mountpoint -q /sys/kernel/debug || mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true; printf "module amdxdna +p\n" > /sys/kernel/debug/dynamic_debug/control 2>&1 || true; echo enabled; else echo debugfs-missing; fi'
+        else
+            printf 'not-requested (pass --debug-driver to enable amdxdna dynamic debug)\n' \
+                >"$directory/amdxdna-dynamic-debug.txt"
+            printf '0\n' >"$directory/amdxdna-dynamic-debug.txt.rc"
+        fi
         capture_guest "$directory/xrt-open-close-context.txt" 1 "$helper_bin /dev/accel/accel0 $REPEAT_OPENS"
         helper_rc=$(<"$directory/xrt-open-close-context.txt.rc")
         if grep -q '^xrt_open_close=fail' "$directory/xrt-open-close-context.txt"; then xrt_open_close=fail
@@ -462,9 +509,18 @@ EOF
         else xrt_open_close=fail; fi
         grep -q '^context_lifetime=ok' "$directory/xrt-open-close-context.txt" && xrt_context=pass || xrt_context=fail
     else
+        printf 'not-enabled because context helper did not build\n' >"$directory/amdxdna-dynamic-debug.txt"
+        printf '0\n' >"$directory/amdxdna-dynamic-debug.txt.rc"
         printf 'Context helper unavailable (build rc %s); no success is inferred.\n' "$helper_build_rc" >"$directory/xrt-open-close-context.txt"
         printf '%s\n' "$helper_build_rc" >"$directory/xrt-open-close-context.txt.rc"
     fi
+
+    # Capture the complete post-XRT kernel path as well as the early probe
+    # snapshot above. Context creation errors are often emitted only after
+    # the DRM ioctl returns, so the final log is authoritative acceptance
+    # B/C/D evidence.
+    capture_guest "$directory/dmesg-amdxdna.txt" 1 \
+        'dmesg --color=never 2>&1 | grep -iE "amdxdna|xdna|aie" || true'
 
     if ((ATTEMPT_SUSPEND == 1)); then
         capture_guest "$directory/suspend-resume.txt" 1 \
