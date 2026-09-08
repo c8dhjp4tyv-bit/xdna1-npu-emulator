@@ -17,6 +17,7 @@
 #include "migration/vmstate.h"
 #include "qom/object.h"
 #include "system/address-spaces.h"
+#include "system/dma.h"
 #include "system/memory.h"
 #include "trace.h"
 
@@ -67,6 +68,14 @@ static int xdna_host_dma_read(void *opaque, uint64_t addr, void *buf,
     XdnaNpuState *s = opaque;
     MemTxResult result;
 
+    /*
+     * QEMU 11.1.1 exposes the PCI bus-master address space without a
+     * PASID-specific selector.  MemTxAttrs.pid is only eight bits and does
+     * not select the Intel VT-d PASID address space, so this callback is
+     * intentionally limited to the emulator's non-PASID control-plane DMA.
+     * Array/execution DMA remains unsupported until a real context-aware
+     * memory model exists; do not manufacture a truncated PASID here.
+     */
     result = pci_dma_read(PCI_DEVICE(s), addr, buf, len);
     trace_xdna_npu_dma_read(addr, len, result);
     if (result != MEMTX_OK) {
@@ -85,8 +94,8 @@ static int xdna_host_dma_read_phys(void *opaque, uint64_t addr, void *buf,
     MemTxResult result;
 
     (void)s;
-    result = address_space_read(&address_space_memory, addr,
-                                MEMTXATTRS_UNSPECIFIED, buf, len);
+    result = dma_memory_read(&address_space_memory, addr, buf, len,
+                             MEMTXATTRS_UNSPECIFIED);
     trace_xdna_npu_dma_phys_read(addr, len, result);
     if (result != MEMTX_OK) {
         qemu_log_mask(LOG_GUEST_ERROR,
@@ -103,6 +112,7 @@ static int xdna_host_dma_write(void *opaque, uint64_t addr, const void *buf,
     XdnaNpuState *s = opaque;
     MemTxResult result;
 
+    /* See xdna_host_dma_read(): no PASID-scoped execution DMA is claimed. */
     result = pci_dma_write(PCI_DEVICE(s), addr, buf, len);
     trace_xdna_npu_dma_write(addr, len, result);
     if (result != MEMTX_OK) {
@@ -271,9 +281,12 @@ static void xdna_npu_realize(PCIDevice *pdev, Error **errp)
     /*
      * amdxdna's normal (non-force_iova) client path asks the guest IOMMU for
      * SVA/PASID. Advertise the endpoint capabilities that a physical XDNA1
-     * function exposes so an upstream VT-d guest can take that path. QEMU
-     * owns the config-space capability registers; libxdna remains unaware of
-     * PCIe and continues to use only the host callbacks above.
+     * function exposes so an upstream VT-d guest can complete discovery and
+     * context setup. This is deliberately not an execution-DMA claim:
+     * QEMU 11.1.1 has no context-aware PCI DMA address-space accessor and the
+     * libxdna execution opcodes still return INVALID_OPERATION. The normal
+     * path is therefore a truthful boot/context compatibility path only;
+     * force_iova does not change that execution limitation.
      */
     pcie_ats_init(pdev, XDNA_ATS_CAP_OFFSET, true);
     pcie_pasid_init(pdev, XDNA_PASID_CAP_OFFSET, 20, false, false);

@@ -23,6 +23,7 @@ INITRD_IMAGE=$(env_or XDNA_GUEST_INITRD "")
 KERNEL_APPEND=$(env_or XDNA_GUEST_APPEND "")
 SSH_TARGET=$(env_or XDNA_GUEST_SSH "root@127.0.0.1")
 SSH_KEY=$(env_or XDNA_GUEST_SSH_KEY "")
+SSH_HOST_FINGERPRINT=$(env_or XDNA_GUEST_SSH_HOST_FINGERPRINT "")
 SSH_PORT=$(env_or XDNA_GUEST_SSH_PORT "0")
 MEMORY=$(env_or XDNA_GUEST_MEMORY "4G")
 SMP=$(env_or XDNA_GUEST_SMP "2")
@@ -44,7 +45,9 @@ Usage: scripts/guest-integration.sh --disk IMAGE [options]
 
 Boot a guest with -device xdna-npu and collect raw driver/XRT/QEMU evidence.
 The disk is opened with QEMU -snapshot. amdxdna is loaded from the guest;
-the guest driver and kernel are never modified. The default runs both modes.
+guest driver and kernel files are never modified. The default runs both modes;
+force_iova reloads the stock module and therefore changes disposable runtime
+driver state.
 
   --qemu PATH          qemu-system-x86_64 (default: build/qemu-v11.1.1/...)
   --firmware-dir PATH  QEMU BIOS/firmware directory (auto-detected when possible)
@@ -56,6 +59,7 @@ the guest driver and kernel are never modified. The default runs both modes.
   --append STRING      guest kernel command line for --kernel
   --ssh USER@HOST      SSH target (default: root@127.0.0.1)
   --ssh-key PATH       SSH private key
+  --ssh-host-fingerprint SHA256:... expected guest host-key fingerprint
   --ssh-port PORT      host forwarding port (0 chooses a free port)
   --mode MODE          normal, force_iova, or both (default: both)
   --memory SIZE        guest RAM (default: 4G)
@@ -94,6 +98,7 @@ while (($#)); do
         --append) (($# >= 2)) || die "--append needs a command line"; KERNEL_APPEND=$2; shift 2 ;;
         --ssh) (($# >= 2)) || die "--ssh needs USER@HOST"; SSH_TARGET=$2; shift 2 ;;
         --ssh-key) (($# >= 2)) || die "--ssh-key needs a path"; SSH_KEY=$2; shift 2 ;;
+        --ssh-host-fingerprint) (($# >= 2)) || die "--ssh-host-fingerprint needs a SHA256 fingerprint"; SSH_HOST_FINGERPRINT=$2; shift 2 ;;
         --ssh-port) (($# >= 2)) || die "--ssh-port needs a port"; SSH_PORT=$2; shift 2 ;;
         --mode) (($# >= 2)) || die "--mode needs a value"; MODE=$2; shift 2 ;;
         --memory) (($# >= 2)) || die "--memory needs a size"; MEMORY=$2; shift 2 ;;
@@ -125,8 +130,25 @@ case "$IOMMU" in
     *) die "--iommu must be none, intel, amd, or virtio" ;;
 esac
 
+[[ "$REPEAT_OPENS" != *$'\n'* && "$REPEAT_OPENS" =~ ^[1-9][0-9]*$ ]] ||
+    die "--repeat-opens must be a positive integer"
+[[ "$PCI_DEVICE" =~ ^[0-9A-Fa-f]{4}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}\.[0-7]$ ]] ||
+    die "--pci-device must be a DDDD:BB:DD.F address"
+# Linux exposes PCI BDFs in lower case; normalize a syntactically valid
+# upper-case argument before it is used in guest sysfs/lspci commands.
+PCI_DEVICE=${PCI_DEVICE,,}
+[[ "$SSH_PORT" =~ ^[0-9]+$ ]] && ((SSH_PORT <= 65535)) ||
+    die "--ssh-port must be an integer from 0 to 65535"
+if [[ -n "$SSH_HOST_FINGERPRINT" &&
+      ! "$SSH_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/=]+$ ]]; then
+    die "--ssh-host-fingerprint must be a SHA256:... fingerprint"
+fi
+[[ -n "$SSH_HOST_FINGERPRINT" ]] ||
+    die "an expected SSH host-key fingerprint is required (source guest.env)"
+
 command -v python3 >/dev/null || die "python3 is required"
 command -v ssh >/dev/null || die "ssh is required"
+command -v ssh-keyscan >/dev/null || die "ssh-keyscan is required"
 if [[ -z "$HELPER_REMOTE" ]]; then
     command -v scp >/dev/null || die "scp is required to upload the context helper"
 fi
@@ -207,6 +229,17 @@ s.close()
 PY
 }
 
+qemu_running() {
+    local pid=$1 state
+    kill -0 "$pid" 2>/dev/null || return 1
+    # kill -0 also succeeds for a zombie.  A guest result is only accepted
+    # while the QEMU process still has a runnable process state.
+    if [[ -r "/proc/$pid/stat" ]]; then
+        state=$(awk '{print $3}' "/proc/$pid/stat" 2>/dev/null || true)
+        [[ "$state" != Z ]]
+    fi
+}
+
 mode_summary() {
     local directory=$1
     python3 - "$directory/status.env" "$directory/summary.json" <<'PY'
@@ -233,12 +266,15 @@ summary = {
         "repetitions": int(values.get("repeat_opens", "0")),
     },
     "force_iova": values.get("force_iova", "not-requested"),
+    "qemu_pid_alive": values.get("qemu_pid_alive", "fail"),
     "suspend_resume": values.get("suspend_resume", "not-requested"),
     "stage_1": values.get("stage_1", "pending"),
     "stage_2": values.get("stage_2", "pending"),
     "stage_3_iova_pasid": values.get("stage_3_iova_pasid", "see iova-pasid.txt"),
     "evidence": {
-        "lspci": "lspci.txt", "dmesg": "dmesg-amdxdna.txt",
+        "lspci": "lspci.txt", "pci_identity": "pci-identity.txt",
+        "dmesg_early": "dmesg-amdxdna.txt",
+        "dmesg_final": "dmesg-amdxdna-final.txt",
         "xrt_smi": "xrt-smi.txt", "qemu_trace": "qemu.log",
         "qemu_stderr": "qemu-stderr.txt", "qemu_version": "qemu-version.txt",
         "versions": "versions.txt",
@@ -255,23 +291,38 @@ PY
 
 mode_report() {
     local directory=$1
-    # shellcheck disable=SC1090
-    source "$directory/status.env"
-    {
-        printf 'XDNA guest integration report\n=============================\n\n'
-        printf 'Mode: %s\nOverall: %s\n\n' "$mode" "$overall"
-        printf 'Acceptance A (PCI 1022:1502 rev 00): %s\n' "$acceptance_a"
-        printf 'Acceptance B (amdxdna entered probe): %s\n' "$acceptance_b"
-        printf 'Acceptance C (/dev/accel/accel0): %s\n\n' "$acceptance_c"
-        printf 'xrt-smi examine: %s\nXRT device open/close: %s (%s iterations)\n' \
-            "$xrt_examine" "$xrt_open_close" "$repeat_opens"
-        printf 'force_iova path: %s\n' "$force_iova"
-        printf 'XDNA context create/destroy: %s\nSuspend/resume: %s\n\n' \
-            "$xrt_context" "$suspend_resume"
-        printf 'Roadmap Stage 1: %s\nRoadmap Stage 2: %s\n' "$stage_1" "$stage_2"
-        printf 'Stage 3 IOVA/PASID: %s\n\n' "$stage_3_iova_pasid"
-        printf 'Raw command outputs are kept beside this report. The guest driver was not patched.\n'
-    } >"$directory/report.txt"
+    python3 - "$directory/summary.json" "$directory/report.txt" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    summary = json.load(stream)
+acceptance = summary.get("acceptance", {})
+xrt = summary.get("xrt", {})
+with open(sys.argv[2], "w", encoding="utf-8") as stream:
+    stream.write("XDNA guest integration report\n=============================\n\n")
+    stream.write("Mode: {}\nOverall: {}\nQEMU PID alive: {}\n\n".format(
+        summary.get("mode", "unknown"), summary.get("overall", "fail"),
+        summary.get("qemu_pid_alive", "fail")))
+    stream.write("Acceptance A (PCI 1022:1502 rev 00): {}\n".format(
+        acceptance.get("A_pci_identity", "fail")))
+    stream.write("Acceptance B (amdxdna entered probe): {}\n".format(
+        acceptance.get("B_amdxdna_probe", "fail")))
+    stream.write("Acceptance C (/dev/accel/accel0): {}\n\n".format(
+        acceptance.get("C_accel_node", "fail")))
+    stream.write("xrt-smi examine: {}\nXRT device open/close: {} ({} iterations)\n".format(
+        xrt.get("examine", "fail"), xrt.get("device_open_close", "skip"),
+        xrt.get("repetitions", 0)))
+    stream.write("force_iova path: {}\n".format(summary.get("force_iova", "not-requested")))
+    stream.write("XDNA context create/destroy: {}\nSuspend/resume: {}\n\n".format(
+        xrt.get("context_create_destroy", "skip"),
+        summary.get("suspend_resume", "not-requested")))
+    stream.write("Roadmap Stage 1: {}\nRoadmap Stage 2: {}\n".format(
+        summary.get("stage_1", "pending"), summary.get("stage_2", "pending")))
+    stream.write("Stage 3 IOVA/PASID: {}\n\n".format(
+        summary.get("stage_3_iova_pasid", "see iova-pasid.txt")))
+    stream.write("Raw command outputs are kept beside this report. The guest driver was not patched.\n")
+PY
 }
 
 ACTIVE_QEMU_PID=
@@ -288,6 +339,10 @@ run_mode() {
     local index=$2
     local directory="$RUN_DIR/$mode"
     local port qemu_pid connected=0 guest_uid=0
+    local qemu_pid_alive=fail
+    local known_hosts="$directory/ssh-known-hosts"
+    local ssh_host=${SSH_TARGET#*@}
+    local scan_fingerprint=
     local acceptance_a=fail acceptance_b=fail acceptance_c=fail
     local xrt_examine=fail xrt_open_close=skip xrt_context=skip
     local force_iova_status=not-requested
@@ -297,8 +352,9 @@ run_mode() {
     if [[ "$SSH_PORT" == 0 ]]; then port=$(find_free_port); else port=$((SSH_PORT + index)); fi
 
     local -a ssh_cmd=(ssh -o BatchMode=yes -o ConnectTimeout=3
-        -o ConnectionAttempts=1 -o StrictHostKeyChecking=no
-        -o UserKnownHostsFile=/dev/null -p "$port")
+        -o ConnectionAttempts=1 -o StrictHostKeyChecking=yes
+        -o "UserKnownHostsFile=$known_hosts"
+        -o GlobalKnownHostsFile=/dev/null -p "$port")
     [[ -z "$SSH_KEY" ]] || ssh_cmd+=(-i "$SSH_KEY")
     guest_exec() { "${ssh_cmd[@]}" "$SSH_TARGET" "$1"; }
     guest_root_exec() {
@@ -346,11 +402,11 @@ run_mode() {
         fi
         if [[ "$IOMMU" == intel && "$kernel_append" != iommu=* &&
               "$kernel_append" != *' iommu='* ]]; then
-            # The amdxdna PSP passes firmware buffers as virt_to_phys().  A
-            # translated vIOMMU therefore faults before probe; passthrough is
-            # the reproducible compatibility mode for this stock driver.
+            # The validated QEMU 11.1.1 run uses translated Intel VT-d with
+            # coherent SVM.  Keep that observed default unless the caller
+            # explicitly selects another kernel IOMMU mode.
             [[ -z "$kernel_append" ]] || kernel_append+=" "
-            kernel_append+="iommu=pt"
+            kernel_append+="iommu=on"
         fi
         if [[ "$mode" == force_iova ]]; then
             if [[ -n "$kernel_append" ]]; then kernel_append+=" "; fi
@@ -377,8 +433,39 @@ run_mode() {
 
     local elapsed=0
     while ((elapsed < BOOT_TIMEOUT)); do
-        if guest_exec true >/dev/null 2>&1; then connected=1; break; fi
-        if ! kill -0 "$qemu_pid" 2>/dev/null; then break; fi
+        if ! qemu_running "$qemu_pid"; then break; fi
+        if [[ ! -s "$known_hosts" ]]; then
+            set +e
+            ssh-keyscan -T 3 -t ed25519 -p "$port" "$ssh_host" >"$known_hosts.tmp" \
+                2>"$directory/ssh-keyscan.txt"
+            local keyscan_rc=$?
+            set -e
+            if ((keyscan_rc == 0)) && [[ -s "$known_hosts.tmp" ]]; then
+                scan_fingerprint=$(ssh-keygen -lf "$known_hosts.tmp" -E sha256 2>/dev/null |
+                    awk 'NR == 1 { print $2; exit }')
+                if [[ -n "$SSH_HOST_FINGERPRINT" &&
+                      "$scan_fingerprint" != "$SSH_HOST_FINGERPRINT" ]]; then
+                    printf 'SSH host-key fingerprint mismatch: expected %s, got %s\n' \
+                        "$SSH_HOST_FINGERPRINT" "$scan_fingerprint" \
+                        >"$directory/ssh-key-fingerprint-error.txt"
+                    rm -f -- "$known_hosts.tmp"
+                else
+                    mv -- "$known_hosts.tmp" "$known_hosts"
+                    chmod 0600 "$known_hosts"
+                    printf 'expected=%s\nobserved=%s\n' \
+                        "${SSH_HOST_FINGERPRINT:-session-pinned}" "$scan_fingerprint" \
+                        >"$directory/ssh-host-fingerprint.txt"
+                fi
+            else
+                rm -f -- "$known_hosts.tmp"
+            fi
+        fi
+        if [[ -s "$known_hosts" ]] && guest_exec true >/dev/null 2>&1 &&
+           qemu_running "$qemu_pid"; then
+            connected=1
+            qemu_pid_alive=pass
+            break
+        fi
         sleep 1
         elapsed=$((elapsed + 1))
     done
@@ -395,6 +482,7 @@ xrt_open_close=skip
 xrt_context=skip
 force_iova=not-reached
 repeat_opens=$REPEAT_OPENS
+qemu_pid_alive=fail
 suspend_resume=not-reached
 stage_1=pending
 stage_2=pending
@@ -408,6 +496,35 @@ EOF
     local uid_rc=$?
     set -e
     if ((uid_rc != 0)) || [[ ! "$guest_uid" =~ ^[0-9]+$ ]]; then guest_uid=0; fi
+
+    printf 'ssh_host=%s\n' "$ssh_host" >"$directory/ssh-endpoint.txt"
+    printf 'expected_host_fingerprint=%s\n' "${SSH_HOST_FINGERPRINT:-session-pinned}" \
+        >>"$directory/ssh-endpoint.txt"
+    printf 'qemu_pid_alive=%s\n' "$qemu_pid_alive" >>"$directory/ssh-endpoint.txt"
+    capture_guest "$directory/prerequisites.txt" 0 \
+        'set -eu; printf "lspci: "; command -v lspci; printf "xrt-smi: "; if command -v xrt-smi >/dev/null 2>&1 || test -x /opt/xilinx/xrt/bin/xrt-smi; then command -v xrt-smi 2>/dev/null || printf "/opt/xilinx/xrt/bin/xrt-smi\n"; else echo missing; exit 127; fi; printf "amdxdna-module: "; if modinfo amdxdna >/dev/null 2>&1 || test -e /sys/module/amdxdna; then echo present; else echo missing; exit 127; fi'
+    if [[ "$(<"$directory/prerequisites.txt.rc")" != 0 ]]; then
+        printf 'Required guest prerequisites are unavailable; dmesg remains diagnostic-only.\n' \
+            >"$directory/connection-error.txt"
+        cat >"$directory/status.env" <<EOF
+mode=$mode
+overall=skip
+acceptance_a=skip
+acceptance_b=skip
+acceptance_c=skip
+xrt_examine=skip
+xrt_open_close=skip
+xrt_context=skip
+force_iova=not-reached
+repeat_opens=$REPEAT_OPENS
+qemu_pid_alive=$qemu_pid_alive
+suspend_resume=not-reached
+stage_1=pending
+stage_2=pending
+stage_3_iova_pasid=unobserved
+EOF
+        mode_summary "$directory"; mode_report "$directory"; cleanup_qemu; ACTIVE_QEMU_PID=; return 77
+    fi
 
     capture_guest "$directory/versions.txt" 0 \
         'printf "uname: "; uname -a; printf "kernel-release: "; uname -r; printf "os-release:\n"; cat /etc/os-release 2>/dev/null || true; printf "amdxdna-modinfo:\n"; if command -v modinfo >/dev/null 2>&1; then modinfo amdxdna 2>&1 || true; else echo modinfo-unavailable; fi; printf "xrt-smi-version:\n"; if command -v xrt-smi >/dev/null 2>&1; then xrt-smi --version 2>&1 || true; elif [ -x /opt/xilinx/xrt/bin/xrt-smi ]; then /opt/xilinx/xrt/bin/xrt-smi --version 2>&1 || true; else echo xrt-smi-unavailable; fi'
@@ -430,10 +547,15 @@ EOF
 
     capture_guest "$directory/lspci.txt" 0 \
         "lspci -Dnnk 2>&1; printf '\n--- verbose ---\n'; lspci -Dvmmnnk 2>&1 || true; printf '\n--- capabilities ---\n'; lspci -Dvvnnk -s '$PCI_DEVICE' 2>&1 || true; printf '\n--- config revision ---\n'; printf 'setpci-revision: '; setpci -s '$PCI_DEVICE' REVISION 2>&1 || true; printf 'sysfs-revision: '; od -An -tx1 -j8 -N1 /sys/bus/pci/devices/'$PCI_DEVICE'/config 2>&1 | tr -d ' \n'; printf '\n--- config space ---\n'; od -Ax -tx1 -v /sys/bus/pci/devices/'$PCI_DEVICE'/config 2>&1 || true"
-    if grep -Eiq '1022:1502.*\(rev[[:space:]]*00\)' "$directory/lspci.txt" ||
-       grep -Eiq 'setpci-revision:[[:space:]]*00|sysfs-revision:[[:space:]]*00' "$directory/lspci.txt"; then
-        acceptance_a=pass; printf 'PASS: 1022:1502 revision 00\n' >"$directory/lspci-check.txt"
-    elif grep -Eiq '1022:1502' "$directory/lspci.txt"; then
+    capture_guest "$directory/pci-identity.txt" 0 \
+        "set -eu; printf 'bdf=%s\\n' '$PCI_DEVICE'; printf 'vendor='; cat /sys/bus/pci/devices/'$PCI_DEVICE'/vendor; printf 'device='; cat /sys/bus/pci/devices/'$PCI_DEVICE'/device; printf 'revision='; cat /sys/bus/pci/devices/'$PCI_DEVICE'/revision; printf '\\n--- selected lspci ---\\n'; lspci -Dnnk -s '$PCI_DEVICE' 2>&1; printf '\\n--- accel node target ---\\n'; printf 'accel0-bdf='; readlink -f /sys/class/accel/accel0/device 2>/dev/null | sed 's#^.*/##' || true"
+    if awk -v bdf="$PCI_DEVICE" 'index(tolower($0), tolower(bdf)) == 1 && $0 ~ /\[1022:1502\]/ { found=1 } END { exit !found }' \
+           "$directory/pci-identity.txt" &&
+       grep -Eiq '^vendor=0x1022$' "$directory/pci-identity.txt" &&
+       grep -Eiq '^device=0x1502$' "$directory/pci-identity.txt" &&
+       grep -Eiq '^revision=0x00$' "$directory/pci-identity.txt"; then
+        acceptance_a=pass; printf 'PASS: selected %s is 1022:1502 revision 00\n' "$PCI_DEVICE" >"$directory/lspci-check.txt"
+    elif grep -Eiq '1022:1502' "$directory/pci-identity.txt"; then
         printf 'FAIL: device ID found but revision 00 was not observed\n' >"$directory/lspci-check.txt"
     else
         printf 'FAIL: AMD XDNA1 PCI identity 1022:1502 was not observed\n' >"$directory/lspci-check.txt"
@@ -441,7 +563,7 @@ EOF
 
     capture_guest "$directory/dmesg-amdxdna.txt" 1 'dmesg --color=never 2>&1 | grep -iE "amdxdna|xdna|aie" || true'
     if grep -Eiq 'Kernel driver in use:[[:space:]]*amdxdna' \
-           "$directory/lspci.txt" ||
+           "$directory/pci-identity.txt" ||
        grep -Eiq 'amdxdna.*(probe|firmware|hardware|device)|(probe|firmware|hardware).*(amdxdna|xdna)' \
            "$directory/dmesg-amdxdna.txt"; then
         acceptance_b=pass
@@ -450,7 +572,8 @@ EOF
         'if test -e /dev/accel/accel0; then stat /dev/accel/accel0; else echo /dev/accel/accel0-missing; exit 1; fi'
     if [[ "$(<"$directory/accel-node.txt.rc")" == 0 ]] &&
        ! grep -q 'missing' "$directory/accel-node.txt" &&
-       [[ -s "$directory/accel-node.txt" ]]; then
+       [[ -s "$directory/accel-node.txt" ]] &&
+       grep -Fxq "accel0-bdf=$PCI_DEVICE" "$directory/pci-identity.txt"; then
         acceptance_c=pass
     fi
 
@@ -476,7 +599,8 @@ EOF
         printf 'Using guest helper: %s\n' "$HELPER_REMOTE" >"$directory/xrt-helper-build.txt"
     else
         local -a scp_opts=(-o BatchMode=yes -o ConnectTimeout=5
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -P "$port")
+            -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$known_hosts"
+            -o GlobalKnownHostsFile=/dev/null -P "$port")
         [[ -z "$SSH_KEY" ]] || scp_opts+=(-i "$SSH_KEY")
         set +e
         scp "${scp_opts[@]}" "$HELPER_SOURCE" "$SSH_TARGET:$helper_src" >"$directory/xrt-helper-build.txt" 2>&1
@@ -517,9 +641,10 @@ EOF
 
     # Capture the complete post-XRT kernel path as well as the early probe
     # snapshot above. Context creation errors are often emitted only after
-    # the DRM ioctl returns, so the final log is authoritative acceptance
-    # B/C/D evidence.
-    capture_guest "$directory/dmesg-amdxdna.txt" 1 \
+    # the DRM ioctl returns, so the final log is authoritative post-XRT
+    # diagnostic evidence; Acceptance B is intentionally decided from the
+    # preserved early snapshot above.
+    capture_guest "$directory/dmesg-amdxdna-final.txt" 1 \
         'dmesg --color=never 2>&1 | grep -iE "amdxdna|xdna|aie" || true'
 
     if ((ATTEMPT_SUSPEND == 1)); then
@@ -532,10 +657,18 @@ EOF
         printf '0\n' >"$directory/suspend-resume.txt.rc"
     fi
 
+    if ! qemu_running "$qemu_pid"; then
+        qemu_pid_alive=fail
+        printf 'QEMU PID %s exited before acceptance was finalized.\n' "$qemu_pid" \
+            >"$directory/qemu-liveness-error.txt"
+    else
+        qemu_pid_alive=pass
+    fi
+
     local overall=fail
     if [[ "$acceptance_a" == pass && "$acceptance_b" == pass && "$acceptance_c" == pass &&
           "$xrt_examine" == pass && "$xrt_open_close" == pass && "$xrt_context" == pass &&
-          "$force_iova_status" != fail ]]; then
+          "$force_iova_status" != fail && "$qemu_pid_alive" == pass ]]; then
         overall=pass; stage_1=complete; stage_2=complete-on-real-guest
     fi
     cat >"$directory/status.env" <<EOF
@@ -549,6 +682,7 @@ xrt_open_close=$xrt_open_close
 xrt_context=$xrt_context
 force_iova=$force_iova_status
 repeat_opens=$REPEAT_OPENS
+qemu_pid_alive=$qemu_pid_alive
 suspend_resume=$suspend_resume
 stage_1=$stage_1
 stage_2=$stage_2
@@ -560,9 +694,15 @@ EOF
 
 MODE_DIRS=()
 FAILURES=0
+SKIPS=0
 for index in "${!MODES[@]}"; do
     mode=${MODES[$index]}; MODE_DIRS+=("$RUN_DIR/$mode")
-    run_mode "$mode" "$index" || FAILURES=$((FAILURES + 1))
+    if run_mode "$mode" "$index"; then
+        :
+    else
+        mode_rc=$?
+        if ((mode_rc == 77)); then SKIPS=$((SKIPS + 1)); else FAILURES=$((FAILURES + 1)); fi
+    fi
 done
 
 python3 - "$RUN_DIR/summary.json" "${MODE_DIRS[@]}" <<'PY'
@@ -573,21 +713,42 @@ result = {"run": os.path.basename(os.path.dirname(sys.argv[1])), "modes": []}
 for directory in sys.argv[2:]:
     with open(os.path.join(directory, "summary.json"), encoding="utf-8") as stream:
         result["modes"].append(json.load(stream))
-result["overall"] = "pass" if result["modes"] and all(item.get("overall") == "pass" for item in result["modes"]) else "fail"
+if result["modes"] and all(item.get("overall") == "pass" for item in result["modes"]):
+    result["overall"] = "pass"
+elif result["modes"] and all(item.get("overall") == "skip" for item in result["modes"]):
+    result["overall"] = "skip"
+else:
+    result["overall"] = "fail"
 with open(sys.argv[1], "w", encoding="utf-8") as stream:
     json.dump(result, stream, indent=2)
     stream.write("\n")
 PY
 
-{
-    printf 'XDNA guest integration run %s\n================================\n\n' "$RUN_ID"
-    for directory in "${MODE_DIRS[@]}"; do
-        # shellcheck disable=SC1090
-        source "$directory/status.env"
-        printf '%s: %s (A=%s B=%s C=%s, xrt-smi=%s, open=%s, context=%s)\n' \
-            "$mode" "$overall" "$acceptance_a" "$acceptance_b" "$acceptance_c" "$xrt_examine" "$xrt_open_close" "$xrt_context"
-    done
-    printf '\nMachine-readable summary: %s\nPer-mode reports: %s/{normal,force_iova}/report.txt\n' "$RUN_DIR/summary.json" "$RUN_DIR"
-} >"$RUN_DIR/report.txt"
+python3 - "$RUN_DIR/summary.json" "$RUN_DIR/report.txt" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    result = json.load(stream)
+with open(sys.argv[2], "w", encoding="utf-8") as stream:
+    stream.write("XDNA guest integration run {}\n================================\n\n".format(result["run"]))
+    for item in result["modes"]:
+        acceptance = item.get("acceptance", {})
+        xrt = item.get("xrt", {})
+        stream.write("{}: {} (A={} B={} C={}, xrt-smi={}, open={}, context={})\n".format(
+            item.get("mode", "unknown"), item.get("overall", "fail"),
+            acceptance.get("A_pci_identity", "fail"),
+            acceptance.get("B_amdxdna_probe", "fail"),
+            acceptance.get("C_accel_node", "fail"),
+            xrt.get("examine", "fail"),
+            xrt.get("device_open_close", "skip"),
+            xrt.get("context_create_destroy", "skip")))
+    stream.write("\nMachine-readable summary: summary.json\n"
+                 "Per-mode reports: {normal,force_iova}/report.txt\n")
+PY
 printf 'Guest integration evidence: %s\n' "$RUN_DIR"
-((FAILURES == 0))
+if ((FAILURES != 0)); then
+    exit 1
+elif ((SKIPS != 0)); then
+    exit 77
+fi

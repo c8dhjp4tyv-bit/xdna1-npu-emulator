@@ -124,11 +124,13 @@ Asama 3 artik "QEMU AMD vIOMMU'da SVA gelistirmesi gerekebilir, yoksa proje
 tikanir" degil. Sirali plan:
 
 1. **Once IOVA modu.** `amdxdna.force_iova=1` ile guest'te probe ve context
-   olusturmayi calistir. Emulator zaten PASID'i sadece kaydediyor, DMA'yi
-   guest fiziksel adresi uzerinden yapiyor -- IOVA modunda bu dogru davranis.
-2. **Sonra tam SVA.** Coklu process izolasyonu ve gercek per-process adres
-   uzayi icin vIOMMU tarafinda PASID/PRI/ATS gerekiyor. Bu, projenin degil
-   QEMU'nun isi; paralel olarak takip edilmeli.
+   olusturmayi calistir. Emulator PASID'i sadece context metadata'sinda
+   kaydediyor; Stage 5 baslamadigi icin execution DMA'si yapmiyor.
+2. **Sonra tam SVA DMA.** Coklu process izolasyonu ve gercek per-process adres
+   uzayi icin vIOMMU tarafinda PASID/PRI/ATS ve QEMU'da context-aware DMA
+   address space gerekiyor. QEMU 11.1.1'in genel PCI DMA API'si bu seciciyi
+   saglamiyor (`MemTxAttrs.pid` 8 bit); bu nedenle mevcut wrapper bunu
+   uygulamiyor veya basari taklidi yapmiyor.
 
 ### Gercek guest sonucu (QEMU 11.1.1)
 
@@ -139,13 +141,17 @@ kipte komut satiri `intel_iommu=on,sm_on iommu=on` ve QEMU Intel VT-d
 PCIe ATS/PASID/PRI extended capability'lerini ve SVM icin coherent ECAP'i
 (`SMPWC`) aciyor. Driver probe sonrasi `/dev/accel/accel0` olustu; `xrt-smi
 examine` cihazi `RyzenAI-npu1` olarak gordu; uc tekrar open/close ile uc
-context create/destroy tamamlandi. MERT trace'inde `pasid 1` goruldu.
+context create/destroy tamamlandi. MERT trace'inde `pasid 1` goruldu. Bu
+capability'ler probe/context uyumlulugu icin yayimlaniyor; QEMU 11.1.1'de
+PASID-tag'li execution DMA'si henuz yok ve execution opcode'lari acikca hata
+donuyor.
 
 Force-IOVA kipinde guest komut satiri `iommu=on amdxdna.force_iova=1` idi.
 Driver dmesg'i `Enabled force_iova mode` kaydetti; ayni firmware, XRT
 examine, tekrarli open/close ve context testleri gecti. Her iki kipte PSP'nin
 `virt_to_phys()` firmware tamponu QEMU fiziksel DMA callback'i ile okunuyor;
-normal cihaz DMA'si PCI DMA/IOMMU callback'inde kaliyor. Bu ayrim, Stage 5
+normal kontrol-duzlemi DMA'si PASID'siz PCI DMA/IOMMU callback'inde kaliyor.
+Bu ayrim, Stage 5
 bellek modeli baslatilmadan onceki gercek gozlemdir; emulator henuz array veya
 execution opcode'larini basarili saymiyor.
 

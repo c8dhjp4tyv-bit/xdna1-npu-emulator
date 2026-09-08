@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 # Reproducible disposable Fedora guest for the stock amdxdna/XRT probe.
 
 ARG BASE_IMAGE=quay.io/fedora/fedora@sha256:20f8c46b8323eb06f921935ce28dab50d5ac3673694d9f2ac866bab6a04b3706

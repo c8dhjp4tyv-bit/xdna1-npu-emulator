@@ -65,11 +65,15 @@ uyumluluk yolu stock driver degistirilmeden calisir.
 **Gozlenen sonuc (QEMU 11.1.1):** Normal kipte Intel VT-d SVM (`svm=on`,
 PASID/ATS/PRI ve coherent SVM ECAP) ile stock driver SVA yoluna girdi; PCI
 config space'te ATS/PASID/PRI capability'leri ve MERT context kayitlarinda
-`pasid 1` goruldu. PSP firmware dogrulamasi icin `virt_to_phys()` tamponu
-QEMU'nun fiziksel DMA callback'i ile okundu, diger DMA `pci_dma_*` yolunda
-kaldi. `iommu=on amdxdna.force_iova=1` kipinde driver kendi IOVA domain'ini
-kurdu; ayni stock firmware/XRT open/context testleri gecti ve dmesg
-`Enabled force_iova mode` kaydetti. Ayrinti ve ham artifact yollar
+`pasid 1` goruldu. Bu, probe/context uyumluluk yolunun gozlemidir; QEMU
+11.1.1'in genel PCI DMA API'si PASID'e gore address space secmiyor ve
+`MemTxAttrs.pid` yalnizca 8 bit, dolayisiyla emulator PASID-tag'li execution
+DMA'si iddia etmiyor. PSP firmware dogrulamasi icin `virt_to_phys()` tamponu
+QEMU'nun fiziksel DMA callback'i ile okundu, diger kontrol-duzlemi DMA'si
+PASID'siz `pci_dma_*` yolunda kaldi. `iommu=on amdxdna.force_iova=1` kipinde
+driver kendi IOVA domain'ini kurdu; ayni stock firmware/XRT open/context
+testleri gecti ve dmesg `Enabled force_iova mode` kaydetti. Ayrinti ve ham
+artifact yollar
 [`docs/evidence/guest-20260908T204620Z.md`](evidence/guest-20260908T204620Z.md)
 icindedir.
 

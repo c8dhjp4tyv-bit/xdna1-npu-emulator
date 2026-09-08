@@ -28,6 +28,24 @@ if (( tar_statuses[0] > 1 || tar_statuses[1] != 0 )); then
         "${tar_statuses[0]}" "${tar_statuses[1]}" >&2
     exit 1
 fi
+
+# Container runtimes bind-mount these paths.  GNU tar can skip a mounted file
+# under --one-file-system, so recreate deterministic guest copies after the
+# root filesystem is unpacked.  guest-setup.sh establishes xdna-guest; retain
+# that value when the source file was omitted by the runtime mount.
+guest_hostname=xdna-guest
+if [[ -r "$STAGING/etc/hostname" ]]; then
+    IFS= read -r guest_hostname <"$STAGING/etc/hostname" || true
+    guest_hostname=${guest_hostname//$'\r'/}
+fi
+[[ "$guest_hostname" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || guest_hostname=xdna-guest
+mkdir -p -- "$STAGING/etc"
+rm -f -- "$STAGING/etc/hostname" "$STAGING/etc/hosts" "$STAGING/etc/resolv.conf"
+printf '%s\n' "$guest_hostname" >"$STAGING/etc/hostname"
+printf '127.0.0.1 localhost localhost.localdomain\n::1 localhost localhost.localdomain\n127.0.1.1 %s\n' \
+    "$guest_hostname" >"$STAGING/etc/hosts"
+printf 'nameserver 10.0.2.3\n' >"$STAGING/etc/resolv.conf"
+
 mkdir -p "$STAGING"/{dev,proc,sys,run,tmp,mnt,media}
 chmod 1777 "$STAGING/tmp"
 

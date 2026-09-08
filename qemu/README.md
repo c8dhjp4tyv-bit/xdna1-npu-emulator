@@ -53,11 +53,17 @@ The device exposes AMD vendor `1022`, device `1502`, revision `00`, 64-bit BAR
 0/2/4 and eight MSI-X vectors.  QEMU trace events are named
 `xdna_npu_*`; enable them with `-d trace:xdna_npu_* -D xdna-qemu.log`.
 
-The PCIe wrapper also publishes the ATS, PASID and PRI extended capabilities
-used by the stock amdxdna SVA path.  The QEMU 11.1.1 integration patch adds
-the Intel VT-d `SMPWC` ECAP only when `intel-iommu,svm=on` is requested;
-QEMU's emulated RAM is coherent, so this is the compatibility bit required by
-Linux SVM.  It is an integration fix in QEMU, not a guest-driver change.
+The PCIe wrapper publishes the ATS, PASID and PRI extended capabilities used by
+the stock amdxdna discovery/context path.  This is not a claim that the
+emulator has functional PASID-tagged execution DMA: QEMU 11.1.1's generic PCI
+DMA API supplies a no-PASID bus-master address space, `MemTxAttrs.pid` is only
+8 bits, and the wrapper has no active per-context PASID at its DMA callback.
+Array/execution operations therefore remain explicitly unsupported until the
+memory/array model adds a context-aware DMA path.  The QEMU 11.1.1 integration
+patch adds the Intel VT-d `SMPWC` ECAP only when `intel-iommu,svm=on` is
+requested; QEMU's emulated RAM is coherent, so this is the compatibility bit
+required by Linux SVM.  It is an integration fix in QEMU, not a guest-driver
+change.
 
 The wrapper's lifetime rules are deliberate: each BAR callback context is
 embedded in the QOM object (no per-BAR heap leak), the core is freed on every
@@ -81,15 +87,23 @@ XDNA_QEMU_BINARY=/tmp/xdna-qemu/qemu-system-x86_64 \
 ```
 
 Alternatively, `scripts/guest-integration.sh` boots a user-supplied guest
-disk over QEMU user networking and collects evidence.  It intentionally does
-not alter the guest kernel or driver.  A typical invocation is:
+disk over QEMU user networking and collects evidence.  It does not modify
+guest kernel or driver files, but `--mode both` unloads and reloads the stock
+`amdxdna` module for the `force_iova=1` run and therefore changes driver state
+inside that disposable snapshot.  A typical invocation is:
 
 ```sh
 scripts/guest-integration.sh \
   --qemu /tmp/xdna-qemu/qemu-system-x86_64 \
   --disk /images/fedora-npu.qcow2 \
-  --ssh root@127.0.0.1 --ssh-key ~/.ssh/id_ed25519
+  --ssh root@127.0.0.1 --ssh-key ~/.ssh/id_ed25519 \
+  --ssh-host-fingerprint SHA256:EXPECTED_GUEST_KEY
 ```
+
+The runner requires the expected host-key fingerprint; the disposable image
+builder writes it to `build/guest/guest.env`, so sourcing that file is the
+usual path.  This prevents a different local process from supplying probe
+results through the forwarded SSH port.
 
 For an uninstalled QEMU build, the runner auto-detects the usual Seabios
 directory; pass `--firmware-dir /path/to/qemu/share` when firmware is stored
@@ -97,8 +111,8 @@ elsewhere.
 
 Use `--mode force_iova` (or the default `--mode both`) for the supported
 `amdxdna.force_iova=1` compatibility path.  The runner unloads and reloads
-the stock module with `modprobe amdxdna force_iova=1`; it does not patch
-`amdxdna`.  For direct kernel boot, pass `--kernel`, optionally `--initrd`,
+the stock module with `modprobe amdxdna force_iova=1`; it never edits driver
+source or module files.  For direct kernel boot, pass `--kernel`, optionally `--initrd`,
 and `--append`; the runner adds `amdxdna.force_iova=1` to the force-IOVA
 mode's command line automatically.  `--iommu intel` (the default) exposes
 the SVA-capable Intel VT-d configuration; `--iommu none`, `amd` and `virtio`
@@ -110,7 +124,7 @@ script exits with status 77 when required guest inputs are absent.
 Each run writes a timestamped evidence directory containing:
 
 * `lspci.txt` and the exact PCI identity check;
-* `dmesg-amdxdna.txt`;
+* early `dmesg-amdxdna.txt` plus post-XRT `dmesg-amdxdna-final.txt`;
 * `xrt-smi.txt`, open/context and repeated open/close results;
 * QEMU stderr plus `xdna-qemu.log` trace output;
 * `qemu-version.txt`, guest `versions.txt` and machine-readable `summary.json`;
@@ -120,6 +134,6 @@ The test records normal and force-IOVA modes separately.  It only reports
 Stage 1/2 as complete after the guest probe and XRT context checks actually
 pass.  The validated run is summarized in
 [`docs/evidence/guest-20260908T204620Z.md`](../docs/evidence/guest-20260908T204620Z.md),
-with raw artifacts under the local `build/guest/evidence-*` directories.  No
+with raw artifacts under the selected local `build/guest/...` output directory.  No
 execution opcode is faked: array-dependent operations continue to return an
 explicit unsupported status until the memory/array model exists.

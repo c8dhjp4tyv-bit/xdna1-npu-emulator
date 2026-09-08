@@ -49,7 +49,7 @@ emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 | --- | --- |
 | 1. PCI kabugu | **tamamlandi** -- temiz QEMU 11.1.1 agacinda `-Werror` ve gercek guest A kabul testi yesil |
 | 2. Surucu boot'u | **tamamlandi (gercek guest)** -- stock `amdxdna` probe'u, firmware boot'u ve `/dev/accel/accel0` yesil |
-| 3. Guest IOMMU (SVA/PASID) | **gozlemlendi** -- normal SVA/PASID ve `force_iova=1` yollarinin ikisi de gercek guest'te yesil |
+| 3. Guest IOMMU (SVA/PASID) | **probe/context gozlemlendi** -- normal SVA/PASID ve `force_iova=1` yollarinin ikisi de gercek guest'te yesil; PASID-tag'li execution DMA henuz yok |
 | 4. Yonetim firmware'i (MERT) | temel mesajlar tamam, testli |
 | 5-10. Bellek modeli, array, ISA, ctrlcode, uctan uca | **baslanmadi** |
 
@@ -74,8 +74,8 @@ Image, sabitlenmis Fedora container userspace'ini kullanir; stock kernel,
 trace ve surum kanitlarini birakir. Guest kernel'i veya driver'i degistirmez.
 
 Son dogrulama kaniti: [`docs/evidence/guest-20260908T204620Z.md`](docs/evidence/guest-20260908T204620Z.md)
-(ham artifact'lar `build/guest/evidence-both-translated/20260908T204620Z/`
-altinda, `normal/` ve `force_iova/` alt dizinlerinde).
+(ham artifact'lar `build/guest/audit/evidence/20260908T220931Z/` altinda,
+`normal/` ve `force_iova/` alt dizinlerinde).
 
 Yurutme opcode'lari (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,
 `CHAIN_EXEC_*`, `SYNC_BO`) su an bilerek **acikca hata donduruyor**. XDNA

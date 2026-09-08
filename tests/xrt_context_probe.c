@@ -190,6 +190,16 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* XRT's index-based handle must refer to the same DRM node we exercise.
+     * This helper intentionally supports the single-device acceptance setup;
+     * reject a different node instead of silently opening XRT device 0 while
+     * probing another accelerator through DRM. */
+    if (strcmp(device_path, DEFAULT_DEVICE) != 0) {
+        fprintf(stderr, "device selector mismatch: this helper supports only %s\n",
+                DEFAULT_DEVICE);
+        return 2;
+    }
+
     printf("xrt_probe_device=%s repeats=%u\n", device_path, repeats);
     ret = xrt_open_close_repeated(repeats);
     if (ret < 0) {

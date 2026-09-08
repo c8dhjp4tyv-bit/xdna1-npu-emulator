@@ -131,6 +131,8 @@ QEMU_BUILD_ARG=$(cd -- "$(dirname -- "$QEMU_BUILD_ARG")" && pwd)/$(basename -- "
 
 if [[ -e "$QEMU_BUILD_ARG" ]]; then
     if [[ "$QEMU_CLEAN_BUILD" == 1 ]]; then
+        [[ -f "$QEMU_BUILD_ARG/.xdna-qemu-build" ]] ||
+            die "refusing to clean a directory not created by this script: $QEMU_BUILD_ARG"
         rm -rf -- "$QEMU_BUILD_ARG"
     elif [[ -n "$(find "$QEMU_BUILD_ARG" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
         [[ -f "$QEMU_BUILD_ARG/.xdna-qemu-build" ]] ||
@@ -141,7 +143,7 @@ mkdir -p -- "$QEMU_BUILD_ARG"
 touch -- "$QEMU_BUILD_ARG/.xdna-qemu-build"
 
 resolve_source() {
-    local candidate
+    local candidate fetched_ref=
 
     if [[ -n "$QEMU_SOURCE_ARG" ]]; then
         [[ -d "$QEMU_SOURCE_ARG" ]] || die "QEMU source directory not found: $QEMU_SOURCE_ARG"
@@ -151,6 +153,17 @@ resolve_source() {
         if [[ ! -d "$candidate/.git" ]]; then
             mkdir -p -- "$QEMU_CACHE_ROOT"
             git clone --depth 1 --branch "$QEMU_REF" "$QEMU_URL" "$candidate"
+        else
+            # A persistent cache may contain an old local branch.  Refresh the
+            # requested remote ref before resolving it, especially for the
+            # moving upstream/master baseline build.
+            local remote
+            remote=$(git -C "$candidate" remote | sed -n '1p')
+            [[ -n "$remote" ]] || die "cached QEMU source has no remote: $candidate"
+            git -C "$candidate" fetch --prune "$remote" "$QEMU_REF" ||
+                die "could not refresh QEMU ref $QEMU_REF in cache: $candidate"
+            fetched_ref=$(git -C "$candidate" rev-parse 'FETCH_HEAD^{commit}' 2>/dev/null || true)
+            [[ -n "$fetched_ref" ]] || die "fetched QEMU ref is not a commit: $QEMU_REF"
         fi
     fi
 
@@ -162,7 +175,11 @@ resolve_source() {
             die "QEMU source tree is not clean: $candidate"
 
         local actual
-        actual=$(git -C "$candidate" rev-parse "${QEMU_REF}^{commit}" 2>/dev/null || true)
+        if [[ -n "$fetched_ref" ]]; then
+            actual=$fetched_ref
+        else
+            actual=$(git -C "$candidate" rev-parse "${QEMU_REF}^{commit}" 2>/dev/null || true)
+        fi
         [[ -n "$actual" ]] || die "QEMU ref not found in source tree: $QEMU_REF"
         if [[ "$QEMU_REF" == v11.1.1 && "$actual" != "$QEMU_11_1_1_COMMIT" ]]; then
             die "QEMU v11.1.1 is not the pinned commit (got $actual, expected $QEMU_11_1_1_COMMIT)"

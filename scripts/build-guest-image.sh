@@ -197,7 +197,18 @@ cp -- "$SCRIPT_DIR/guest-image/guest-setup.sh" "$CONTEXT/guest-setup.sh"
 cp -- "$SCRIPT_DIR/guest-image/make-disk.sh" "$CONTEXT/make-disk.sh"
 
 printf 'Building disposable guest builder image: %s\n' "$IMAGE_TAG"
-"$ENGINE" build --pull=never \
+BUILD_PULL_ARGS=()
+case "$(basename -- "$ENGINE")" in
+    podman|podman-remote) BUILD_PULL_ARGS=(--pull=never) ;;
+    docker)
+        # Docker's --pull flag is boolean.  Keep --no-pull offline when the
+        # caller requested it; after an explicit pull, false also prevents a
+        # second mutable base-image lookup during the build.
+        BUILD_PULL_ARGS=(--pull=false)
+        ;;
+    *) die "unsupported container engine (use Docker or Podman): $ENGINE" ;;
+esac
+"$ENGINE" build "${BUILD_PULL_ARGS[@]}" \
     --build-arg "BASE_IMAGE=$BASE_IMAGE" \
     --build-arg "KVER=$KVER" \
     --tag "$IMAGE_TAG" --file "$CONTEXT/Containerfile" "$CONTEXT"
@@ -207,6 +218,16 @@ printf 'Creating raw guest disk: %s (%s)\n' "$IMAGE_PATH" "$IMAGE_SIZE"
     --volume "$IMAGE_DIR:/output:Z" "$IMAGE_TAG" \
     /usr/local/sbin/xdna-make-disk "/output/$(basename -- "$IMAGE_PATH")" "$IMAGE_SIZE"
 [[ -s "$IMAGE_PATH" ]] || die "guest image was not created: $IMAGE_PATH"
+
+# The image builder generated the SSH host key, so record its fingerprint as
+# an expected identity for the runner.  The runner still uses a per-run
+# known_hosts file, but it rejects a key that is not the key baked into this
+# disposable image (rather than accepting an arbitrary process on the port).
+SSH_HOST_FINGERPRINT=$("$ENGINE" run --rm --network=none "$IMAGE_TAG" \
+    ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 2>/dev/null |
+    awk 'NR == 1 { print $2; exit }')
+[[ "$SSH_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/=]+$ ]] ||
+    die "could not determine the generated guest SSH host-key fingerprint"
 
 XRT_VERSION=$(python3 - "$XRT_ROOT/version.json" <<'PY'
 import json
@@ -234,6 +255,7 @@ GUEST_APPEND=${XDNA_GUEST_APPEND:-'root=/dev/vda rootfstype=ext4 rw console=ttyS
     printf 'XDNA_GUEST_DISK_FORMAT=raw\n'
     printf 'XDNA_GUEST_SSH=root@127.0.0.1\n'
     printf 'XDNA_GUEST_SSH_KEY=%q\n' "$SSH_KEY"
+    printf 'XDNA_GUEST_SSH_HOST_FINGERPRINT=%q\n' "$SSH_HOST_FINGERPRINT"
     printf 'XDNA_GUEST_KERNEL=%q\n' "$KERNEL_PATH"
     printf 'XDNA_GUEST_INITRD=%q\n' "$INITRD_PATH"
     printf 'XDNA_GUEST_APPEND=%q\n' "$GUEST_APPEND"
@@ -261,7 +283,7 @@ REPORT_PATH=$OUTPUT_DIR/build-report.txt
     printf 'amdxdna module: %s\namdxdna version/srcversion: %s\n' "$AMDXDNA_MODULE" "$DRIVER_VERSION"
     printf 'Firmware root: %s\nXRT root: %s\nXRT version: %s\nUAPI root: %s\n' \
         "$FIRMWARE_ROOT" "$XRT_ROOT" "$XRT_VERSION" "$UAPI_ROOT"
-    printf 'SSH key: %s\n\n' "$SSH_KEY"
+    printf 'SSH key: %s\nSSH host-key fingerprint: %s\n\n' "$SSH_KEY" "$SSH_HOST_FINGERPRINT"
     printf 'Source environment before running the guest test:\n  source %q\n\n' "$ENV_PATH"
     printf 'Guest kernel append: %s\n\n' "$GUEST_APPEND"
     printf 'Guest test (normal and force_iova):\n  XDNA_QEMU_BINARY=/path/to/qemu-system-x86_64 %q --mode both\n' \
