@@ -47,7 +47,7 @@ Options:
 Examples:
   scripts/build-qemu.sh
   scripts/build-qemu.sh --qemu-src /work/qemu-11.1.1 --build-dir /tmp/xdna-qemu
-  scripts/build-qemu.sh --qemu-ref master --no-werror
+  scripts/build-qemu.sh --qemu-ref master --no-werror --baseline-only
 EOF
 }
 

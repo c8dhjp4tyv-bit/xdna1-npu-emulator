@@ -30,9 +30,10 @@ scripts/build-qemu.sh \
   --jobs 8
 ```
 
-`--qemu-ref master --no-werror` is useful for an informational upstream build
-check.  The primary script refuses a dirty Git source tree and verifies the
-11.1.1 commit before integrating it.
+`--qemu-ref master --no-werror --baseline-only` is useful for the informational
+upstream build check.  It compiles a moving upstream checkout without applying
+the version-pinned integration patch; the primary script refuses a dirty Git
+source tree and verifies the 11.1.1 commit before integrating it.
 
 The generated `xdna-build.env` records the source, commit, build directory and
 binary path.  `-device xdna-npu` is checked after linking.
