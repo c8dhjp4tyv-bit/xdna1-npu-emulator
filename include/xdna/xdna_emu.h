@@ -36,6 +36,14 @@ enum {
 typedef struct XdnaHostOps {
     /* Guest fiziksel bellegine erisim. 0 = basarili, <0 = hata. */
     int (*dma_read)(void *opaque, uint64_t addr, void *buf, size_t len);
+    /*
+     * PSP firmware buffers are passed by amdxdna as guest physical addresses
+     * (virt_to_phys()), even when force_iova selects a translated private
+     * domain.  This optional callback reads that address without PCI-IOMMU
+     * translation.  It is used only for PSP image validation; all regular
+     * device DMA continues through dma_read/dma_write.
+     */
+    int (*dma_read_phys)(void *opaque, uint64_t addr, void *buf, size_t len);
     int (*dma_write)(void *opaque, uint64_t addr, const void *buf, size_t len);
     /* MSI-X vektorunu tetikle. */
     void (*raise_irq)(void *opaque, unsigned vector);

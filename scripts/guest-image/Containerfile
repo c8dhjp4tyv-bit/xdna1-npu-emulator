@@ -1,0 +1,60 @@
+# Reproducible disposable Fedora guest for the stock amdxdna/XRT probe.
+
+ARG BASE_IMAGE=quay.io/fedora/fedora@sha256:20f8c46b8323eb06f921935ce28dab50d5ac3673694d9f2ac866bab6a04b3706
+FROM ${BASE_IMAGE}
+
+ARG KVER
+ENV container=podman
+STOPSIGNAL SIGRTMIN+3
+
+RUN dnf -y install \
+        ca-certificates \
+        e2fsprogs \
+        findutils \
+        gcc \
+        glibc-devel \
+        grep \
+        iproute \
+        iputils \
+        kmod \
+        libdrm-devel \
+        libgcc \
+        libstdc++ \
+        libuuid \
+        libuuid-devel \
+        make \
+        NetworkManager \
+        openssh-clients \
+        openssh-server \
+        pciutils \
+        procps-ng \
+        shadow-utils \
+        sudo \
+        systemd \
+        tar \
+        util-linux \
+        which \
+        xz \
+        boost-container \
+        boost-filesystem \
+        boost-program-options \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+COPY modules/ /tmp/xdna-modules/
+COPY firmware/ /tmp/xdna-firmware/
+COPY xrt/ /opt/xilinx/xrt/
+COPY uapi/ /usr/include/drm/
+COPY ssh/authorized_keys /etc/xdna-guest/authorized_keys
+COPY guest-setup.sh /usr/local/sbin/xdna-guest-setup
+COPY make-disk.sh /usr/local/sbin/xdna-make-disk
+
+RUN chmod 0755 /usr/local/sbin/xdna-guest-setup /usr/local/sbin/xdna-make-disk \
+    && mkdir -p "/usr/lib/modules/${KVER}" \
+    && cp -a /tmp/xdna-modules/. "/usr/lib/modules/${KVER}/" \
+    && cp -a /tmp/xdna-firmware/. /usr/lib/firmware/ \
+    && depmod -a "${KVER}" \
+    && /usr/local/sbin/xdna-guest-setup "${KVER}" \
+    && rm -rf /tmp/xdna-modules /tmp/xdna-firmware /var/cache/dnf
+
+CMD ["/sbin/init"]

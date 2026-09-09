@@ -1,3 +1,4 @@
 build/
+evidence/guest/
 *.o
 *.a

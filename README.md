@@ -34,6 +34,7 @@ dogrulanabiliyor.
 ```sh
 make          # build/libxdna.a
 make test     # surucu boot dizisi kosumu
+make qemu     # clean QEMU 11.1.1 integration/build (out-of-tree)
 ```
 
 `make test` stock `amdxdna` surucusunun boot dizisini birebir taklit eder --
@@ -46,13 +47,36 @@ emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
 
 | Asama | Durum |
 | --- | --- |
-| 1. PCI kabugu | QEMU aygiti yazildi, **derlenmedi** (bu depoda QEMU agaci yok) |
-| 2. Surucu boot'u | cekirdek tamam, testli |
-| 3. Guest IOMMU (SVA/PASID) | plan var, bkz. acik sorular |
+| 1. PCI kabugu | **tamamlandi** -- temiz QEMU 11.1.1 agacinda `-Werror` ve gercek guest A kabul testi yesil |
+| 2. Surucu boot'u | **tamamlandi (gercek guest)** -- stock `amdxdna` probe'u, firmware boot'u ve `/dev/accel/accel0` yesil |
+| 3. Guest IOMMU (SVA/PASID) | **probe/context gozlemlendi** -- normal SVA/PASID ve `force_iova=1` yollarinin ikisi de gercek guest'te yesil; PASID-tag'li execution DMA henuz yok |
 | 4. Yonetim firmware'i (MERT) | temel mesajlar tamam, testli |
-| 5-10. Bellek modeli, array, ISA, ctrlcode, uctan uca | baslanmadi |
+| 5-10. Bellek modeli, array, ISA, ctrlcode, uctan uca | **baslanmadi** |
 
 Tam liste ve kabul kriterleri: [`docs/02-yol-haritasi.md`](docs/02-yol-haritasi.md).
+
+Gercek guest calistirmasi icin once [`qemu/README.md`](qemu/README.md)'deki
+`scripts/build-qemu.sh` adimini tamamlayin. Tekrarlanabilir, disposable bir
+guest image'i host'un sectigi cekirdek/modul/firmware/XRT yiginindan su sekilde
+olusturabilirsiniz:
+
+```sh
+scripts/build-guest-image.sh
+set -a; . build/guest/guest.env; set +a
+XDNA_QEMU_BINARY=/tmp/xdna-qemu/qemu-system-x86_64 \
+  scripts/guest-integration.sh --mode both --debug-driver
+```
+
+Image, sabitlenmis Fedora container userspace'ini kullanir; stock kernel,
+`amdxdna.ko`, firmware ve XRT host'tan kopyalanir. Runner her modu ayri
+`-snapshot` boot'unda deneyip secilen `build/guest/...` cikti dizininin
+`evidence/<timestamp>/` altinda
+`summary.json`, insan-okunur rapor ve ham `lspci`, `dmesg`, `xrt-smi`, QEMU
+trace ve surum kanitlarini birakir. Guest kernel'i veya driver'i degistirmez.
+
+Son dogrulama kaniti: [`docs/evidence/guest-20260908T225000Z.md`](docs/evidence/guest-20260908T225000Z.md)
+(ham artifact'lar, kosumun sectigi yerel `build/guest/...` cikti dizininde,
+`normal/` ve `force_iova/` alt dizinlerinde).
 
 Yurutme opcode'lari (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,
 `CHAIN_EXEC_*`, `SYNC_BO`) su an bilerek **acikca hata donduruyor**. XDNA

@@ -1,0 +1,112 @@
+{
+  "captured_at": "2026-09-08T22:50:00Z",
+  "qemu": {
+    "version": "11.1.1",
+    "commit": "c3d48b7d1e89604920e5b81b91140c2ad39a1943",
+    "warnings_as_errors": true,
+    "binary": "qemu-system-x86_64"
+  },
+  "guest": {
+    "distribution": "Fedora Linux 46 (Container Image Prerelease)",
+    "kernel": "7.3.0-0.rc1.260903.940de590.519.vanilla.fc46.x86_64",
+    "amdxdna": "0.10.0 (stock kernel module; initialized in dmesg)",
+    "xrt": "2.26.0",
+    "npu_firmware": "5.7.0.0",
+    "ssh_host_fingerprint": "SHA256:Tz4MGrSBFP8U3dQB/FOiliNc5/HZM+3WSSyZL6PHTq0",
+    "driver_modified": false,
+    "boot": "direct kernel; host initramfs was not readable"
+  },
+  "modes": {
+    "normal": {
+      "overall": "pass",
+      "kernel_append": "intel_iommu=on,sm_on iommu=on",
+      "qemu_pid_alive": "pass",
+      "ssh_host_authenticated": true,
+      "acceptance": {
+        "A_pci_identity": "pass",
+        "B_amdxdna_probe": "pass",
+        "C_accel_node": "pass",
+        "D_xrt": "pass"
+      },
+      "pci": {
+        "bdf": "0000:00:02.0",
+        "vendor_device": "1022:1502",
+        "revision": "00",
+        "driver": "amdxdna",
+        "extended_capabilities": ["ATS", "PASID", "PRI"]
+      },
+      "iommu": {
+        "qemu": "Intel VT-d svm=on,pasid-bits=20,scalable-mode=on,fsts=on",
+        "driver_path": "translated SVA/PASID probe/context path",
+        "pasid_observed": "1 in QEMU MERT context trace (context metadata, not a DMA transaction)",
+        "psp_dma": "physical callback for virt_to_phys firmware buffer",
+        "regular_dma": "PCI DMA/IOMMU callback without PASID tagging; execution DMA unsupported"
+      },
+      "xrt": {
+        "examine": "pass",
+        "open_close_repetitions": 3,
+        "context_create_destroy_repetitions": 3,
+        "device": "RyzenAI-npu1"
+      },
+      "evidence_files": {
+        "pci_identity": "pci-identity.txt",
+        "dmesg_early": "dmesg-amdxdna.txt",
+        "dmesg_final": "dmesg-amdxdna-final.txt",
+        "xrt_smi": "xrt-smi.txt",
+        "qemu_trace": "qemu.log",
+        "qemu_stderr": "qemu-stderr.txt",
+        "versions": "versions.txt"
+      },
+      "artifacts": "build/guest/audit/evidence/20260908T225000Z/normal"
+    },
+    "force_iova": {
+      "overall": "pass",
+      "kernel_append": "intel_iommu=on,sm_on iommu=on amdxdna.force_iova=1",
+      "qemu_pid_alive": "pass",
+      "ssh_host_authenticated": true,
+      "acceptance": {
+        "A_pci_identity": "pass",
+        "B_amdxdna_probe": "pass",
+        "C_accel_node": "pass",
+        "D_xrt": "pass"
+      },
+      "pci": {
+        "bdf": "0000:00:02.0",
+        "vendor_device": "1022:1502",
+        "revision": "00",
+        "driver": "amdxdna",
+        "extended_capabilities": ["ATS", "PASID", "PRI"]
+      },
+      "iommu": {
+        "qemu": "Intel VT-d translated default domain",
+        "driver_path": "amdxdna private IOVA domain (force_iova)",
+        "force_iova_dmesg": "Enabled force_iova mode",
+        "psp_dma": "physical callback for virt_to_phys firmware buffer",
+        "regular_dma": "PCI DMA/IOMMU callback without PASID tagging; execution DMA unsupported"
+      },
+      "xrt": {
+        "examine": "pass",
+        "open_close_repetitions": 3,
+        "context_create_destroy_repetitions": 3,
+        "device": "RyzenAI-npu1"
+      },
+      "evidence_files": {
+        "pci_identity": "pci-identity.txt",
+        "dmesg_early": "dmesg-amdxdna.txt",
+        "dmesg_final": "dmesg-amdxdna-final.txt",
+        "xrt_smi": "xrt-smi.txt",
+        "qemu_trace": "qemu.log",
+        "qemu_stderr": "qemu-stderr.txt",
+        "versions": "versions.txt"
+      },
+      "artifacts": "build/guest/audit/evidence/20260908T225000Z/force_iova"
+    }
+  },
+  "roadmap": {
+    "stage_1": "complete",
+    "stage_2": "complete-on-real-guest",
+    "stage_3_iova_pasid": "observed-in-evidence",
+    "stage_5": "not-started"
+  },
+  "suspend_resume": "not-requested"
+}

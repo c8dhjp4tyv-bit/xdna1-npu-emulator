@@ -36,12 +36,14 @@ static uint32_t psp_fetch_image(XdnaNpu *npu, uint64_t paddr, uint32_t size)
 {
     uint8_t peek[PSP_PEEK_BYTES];
     uint32_t n = size < PSP_PEEK_BYTES ? size : PSP_PEEK_BYTES;
+    int (*read)(void *, uint64_t, void *, size_t);
 
     if (!size) {
         return PSP_ERROR_BAD_STATE;
     }
-    if (!npu->ops->dma_read ||
-        npu->ops->dma_read(npu->opaque, paddr, peek, n) != 0) {
+    read = npu->ops->dma_read_phys ? npu->ops->dma_read_phys :
+                                     npu->ops->dma_read;
+    if (!read || read(npu->opaque, paddr, peek, n) != 0) {
         xdna_log(npu, XDNA_LOG_ERROR,
                  "PSP firmware imaji okunamadi: paddr 0x%llx size 0x%x",
                  (unsigned long long)paddr, size);

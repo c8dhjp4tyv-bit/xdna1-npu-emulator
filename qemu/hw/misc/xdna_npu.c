@@ -7,17 +7,19 @@
  *
  * SPDX-License-Identifier: GPL-2.0-only
  *
- * DIKKAT: Bu dosya bu depoda DERLENMEMISTIR -- konteynerde QEMU agaci yok.
- * Derlemek icin qemu/README.md'deki adimlari izleyin.
  */
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "hw/pci/pci_device.h"
+#include "hw/pci/pcie.h"
 #include "hw/pci/msix.h"
-#include "hw/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
+#include "system/address-spaces.h"
+#include "system/dma.h"
+#include "system/memory.h"
+#include "trace.h"
 
 #include "xdna/xdna_emu.h"
 #include "xdna/xdna_regs.h"
@@ -33,6 +35,16 @@ OBJECT_DECLARE_SIMPLE_TYPE(XdnaNpuState, XDNA_NPU)
 #define XDNA_MSIX_TABLE_OFFSET 0x40000
 #define XDNA_MSIX_PBA_OFFSET   0x50000
 
+/* Optional PCIe extended capabilities used by the guest SVA path. */
+#define XDNA_ATS_CAP_OFFSET    0x100
+#define XDNA_PASID_CAP_OFFSET  0x110
+#define XDNA_PRI_CAP_OFFSET    0x120
+
+typedef struct XdnaBarCtx {
+    struct XdnaNpuState *s;
+    int bar;
+} XdnaBarCtx;
+
 struct XdnaNpuState {
     PCIDevice parent_obj;
 
@@ -40,7 +52,10 @@ struct XdnaNpuState {
     MemoryRegion bar_sram;
     MemoryRegion bar_mbox;
 
+    /* MemoryRegionOps opaque values are embedded in the device. */
+    XdnaBarCtx bar_ctx[3];
     XdnaNpu *emu;
+    bool msix_initialized;
 };
 
 /* ------------------------------------------------------------------ */
@@ -51,16 +66,62 @@ static int xdna_host_dma_read(void *opaque, uint64_t addr, void *buf,
                               size_t len)
 {
     XdnaNpuState *s = opaque;
+    MemTxResult result;
 
-    return pci_dma_read(PCI_DEVICE(s), addr, buf, len) == MEMTX_OK ? 0 : -1;
+    /*
+     * QEMU 11.1.1 exposes the PCI bus-master address space without a
+     * PASID-specific selector.  MemTxAttrs.pid is only eight bits and does
+     * not select the Intel VT-d PASID address space, so this callback is
+     * intentionally limited to the emulator's non-PASID control-plane DMA.
+     * Array/execution DMA remains unsupported until a real context-aware
+     * memory model exists; do not manufacture a truncated PASID here.
+     */
+    result = pci_dma_read(PCI_DEVICE(s), addr, buf, len);
+    trace_xdna_npu_dma_read(addr, len, result);
+    if (result != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "xdna-npu: DMA read failed at 0x%" PRIx64
+                      " (len=%zu, result=%d)\n", addr, len, result);
+        return -1;
+    }
+    return 0;
+}
+
+static int xdna_host_dma_read_phys(void *opaque, uint64_t addr, void *buf,
+                                   size_t len)
+{
+    XdnaNpuState *s = opaque;
+    MemTxResult result;
+
+    (void)s;
+    result = dma_memory_read(&address_space_memory, addr, buf, len,
+                             MEMTXATTRS_UNSPECIFIED);
+    trace_xdna_npu_dma_phys_read(addr, len, result);
+    if (result != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "xdna-npu: physical DMA read failed at 0x%" PRIx64
+                      " (len=%zu, result=%d)\n", addr, len, result);
+        return -1;
+    }
+    return 0;
 }
 
 static int xdna_host_dma_write(void *opaque, uint64_t addr, const void *buf,
                                size_t len)
 {
     XdnaNpuState *s = opaque;
+    MemTxResult result;
 
-    return pci_dma_write(PCI_DEVICE(s), addr, buf, len) == MEMTX_OK ? 0 : -1;
+    /* See xdna_host_dma_read(): no PASID-scoped execution DMA is claimed. */
+    result = pci_dma_write(PCI_DEVICE(s), addr, buf, len);
+    trace_xdna_npu_dma_write(addr, len, result);
+    if (result != MEMTX_OK) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "xdna-npu: DMA write failed at 0x%" PRIx64
+                      " (len=%zu, result=%d)\n", addr, len, result);
+        return -1;
+    }
+    return 0;
 }
 
 static void xdna_host_raise_irq(void *opaque, unsigned vector)
@@ -72,14 +133,18 @@ static void xdna_host_raise_irq(void *opaque, unsigned vector)
         return;
     }
     if (msix_enabled(pdev)) {
+        trace_xdna_npu_irq(vector, 1);
         msix_notify(pdev, vector);
     } else {
+        trace_xdna_npu_irq(vector, 0);
         pci_set_irq(pdev, 1);
     }
 }
 
 static void xdna_host_log(void *opaque, int level, const char *msg)
 {
+    (void)opaque;
+
     if (level <= XDNA_LOG_WARN) {
         qemu_log_mask(LOG_GUEST_ERROR, "xdna-npu: %s\n", msg);
     } else {
@@ -89,6 +154,7 @@ static void xdna_host_log(void *opaque, int level, const char *msg)
 
 static const XdnaHostOps xdna_host_ops = {
     .dma_read = xdna_host_dma_read,
+    .dma_read_phys = xdna_host_dma_read_phys,
     .dma_write = xdna_host_dma_write,
     .raise_irq = xdna_host_raise_irq,
     .log = xdna_host_log,
@@ -97,11 +163,6 @@ static const XdnaHostOps xdna_host_ops = {
 /* ------------------------------------------------------------------ */
 /* MMIO                                                                */
 /* ------------------------------------------------------------------ */
-
-typedef struct {
-    XdnaNpuState *s;
-    int bar;
-} XdnaBarCtx;
 
 static uint64_t xdna_bar_read(void *opaque, hwaddr addr, unsigned size)
 {
@@ -126,16 +187,6 @@ static const MemoryRegionOps xdna_bar_ops = {
     .impl = { .min_access_size = 1, .max_access_size = 8 },
 };
 
-/* Her BAR icin kucuk bir baglam; aygit omru boyunca yasar. */
-static XdnaBarCtx *xdna_bar_ctx_new(XdnaNpuState *s, int bar)
-{
-    XdnaBarCtx *ctx = g_new0(XdnaBarCtx, 1);
-
-    ctx->s = s;
-    ctx->bar = bar;
-    return ctx;
-}
-
 /* ------------------------------------------------------------------ */
 /* Aygit yasam dongusu                                                 */
 /* ------------------------------------------------------------------ */
@@ -144,14 +195,25 @@ static void xdna_npu_reset_hold(Object *obj, ResetType type)
 {
     XdnaNpuState *s = XDNA_NPU(obj);
 
-    xdna_npu_reset(s->emu);
-    msix_reset(PCI_DEVICE(s));
+    (void)type;
+
+    trace_xdna_npu_reset();
+    if (s->emu) {
+        xdna_npu_reset(s->emu);
+    }
+    if (s->msix_initialized) {
+        msix_reset(PCI_DEVICE(s));
+    }
+    pci_set_irq(PCI_DEVICE(s), 0);
 }
 
 static void xdna_npu_realize(PCIDevice *pdev, Error **errp)
 {
     XdnaNpuState *s = XDNA_NPU(pdev);
     int ret;
+
+    trace_xdna_npu_realize();
+    pci_config_set_interrupt_pin(pdev->config, 1);
 
     s->emu = xdna_npu_new(&xdna_host_ops, s);
     if (!s->emu) {
@@ -160,14 +222,18 @@ static void xdna_npu_realize(PCIDevice *pdev, Error **errp)
     }
 
     /* Surucu 64-bit DMA maskesi kuruyor; BAR'lar da 64-bit. */
+    s->bar_ctx[0] = (XdnaBarCtx) { .s = s, .bar = XDNA_BAR_REG };
+    s->bar_ctx[1] = (XdnaBarCtx) { .s = s, .bar = XDNA_BAR_SRAM };
+    s->bar_ctx[2] = (XdnaBarCtx) { .s = s, .bar = XDNA_BAR_MBOX };
+
     memory_region_init_io(&s->bar_reg, OBJECT(s), &xdna_bar_ops,
-                          xdna_bar_ctx_new(s, XDNA_BAR_REG),
+                          &s->bar_ctx[0],
                           "xdna-npu-reg", XDNA_BAR_REG_SIZE);
     memory_region_init_io(&s->bar_sram, OBJECT(s), &xdna_bar_ops,
-                          xdna_bar_ctx_new(s, XDNA_BAR_SRAM),
+                          &s->bar_ctx[1],
                           "xdna-npu-sram", XDNA_BAR_SRAM_SIZE);
     memory_region_init_io(&s->bar_mbox, OBJECT(s), &xdna_bar_ops,
-                          xdna_bar_ctx_new(s, XDNA_BAR_MBOX),
+                          &s->bar_ctx[2],
                           "xdna-npu-mbox", XDNA_BAR_MBOX_SIZE);
 
     pci_register_bar(pdev, XDNA_BAR_REG,
@@ -185,10 +251,15 @@ static void xdna_npu_realize(PCIDevice *pdev, Error **errp)
                     &s->bar_reg, XDNA_BAR_REG, XDNA_MSIX_PBA_OFFSET,
                     0, errp);
     if (ret < 0) {
+        /* msix_init() can fail after adding the capability. */
+        if (msix_present(pdev)) {
+            msix_uninit(pdev, &s->bar_reg, &s->bar_reg);
+        }
         xdna_npu_free(s->emu);
         s->emu = NULL;
         return;
     }
+    s->msix_initialized = true;
     for (int i = 0; i < XDNA_MSIX_VECTORS; i++) {
         msix_vector_use(pdev, i);
     }
@@ -197,23 +268,51 @@ static void xdna_npu_realize(PCIDevice *pdev, Error **errp)
      * Sinif kodu (0x1200, "Processing accelerator") class_init icinde
      * ayarlaniyor; surucu buna bakmiyor ama lspci ciktisi anlamli oluyor.
      */
-    pcie_endpoint_cap_init(pdev, 0);
+    ret = pcie_endpoint_cap_init(pdev, 0);
+    if (ret < 0) {
+        error_setg(errp, "xdna-npu: PCIe endpoint capability init failed");
+        msix_uninit(pdev, &s->bar_reg, &s->bar_reg);
+        s->msix_initialized = false;
+        xdna_npu_free(s->emu);
+        s->emu = NULL;
+        return;
+    }
+
+    /*
+     * amdxdna's normal (non-force_iova) client path asks the guest IOMMU for
+     * SVA/PASID. Advertise the endpoint capabilities that a physical XDNA1
+     * function exposes so an upstream VT-d guest can complete discovery and
+     * context setup. This is deliberately not an execution-DMA claim:
+     * QEMU 11.1.1 has no context-aware PCI DMA address-space accessor and the
+     * libxdna execution opcodes still return INVALID_OPERATION. The normal
+     * path is therefore a truthful boot/context compatibility path only;
+     * force_iova does not change that execution limitation.
+     */
+    pcie_ats_init(pdev, XDNA_ATS_CAP_OFFSET, true);
+    pcie_pasid_init(pdev, XDNA_PASID_CAP_OFFSET, 20, false, false);
+    pcie_pri_init(pdev, XDNA_PRI_CAP_OFFSET, 32, true);
 }
 
 static void xdna_npu_exit(PCIDevice *pdev)
 {
     XdnaNpuState *s = XDNA_NPU(pdev);
 
-    msix_uninit(pdev, &s->bar_reg, &s->bar_reg);
+    if (s->msix_initialized) {
+        msix_uninit(pdev, &s->bar_reg, &s->bar_reg);
+        s->msix_initialized = false;
+    }
+    pci_set_irq(pdev, 0);
     xdna_npu_free(s->emu);
     s->emu = NULL;
 }
 
-static void xdna_npu_class_init(ObjectClass *klass, void *data)
+static void xdna_npu_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
     ResettableClass *rc = RESETTABLE_CLASS(klass);
+
+    (void)data;
 
     k->realize = xdna_npu_realize;
     k->exit = xdna_npu_exit;

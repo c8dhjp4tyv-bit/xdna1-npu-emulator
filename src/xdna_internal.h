@@ -12,6 +12,13 @@
 #include "xdna/xdna_emu.h"
 #include "xdna/xdna_regs.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+#define XDNA_PRINTF_ATTR(fmt_idx, arg_idx) \
+    __attribute__((format(printf, fmt_idx, arg_idx)))
+#else
+#define XDNA_PRINTF_ATTR(fmt_idx, arg_idx)
+#endif
+
 #define XDNA_MAX_CHANNELS (1u + XDNA_NPU1_HWCTX_LIMIT) /* mgmt + 6 hwctx */
 
 /*
@@ -127,7 +134,8 @@ struct XdnaNpu {
 
 /* --- ic API --- */
 
-void xdna_log(XdnaNpu *npu, int level, const char *fmt, ...);
+void xdna_log(XdnaNpu *npu, int level, const char *fmt, ...)
+    XDNA_PRINTF_ATTR(3, 4);
 
 /* PSP / SMU durum makineleri */
 void xdna_psp_kick(XdnaNpu *npu);

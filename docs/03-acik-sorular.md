@@ -1,8 +1,10 @@
 # Acik sorular ve risk degerlendirmesi
 
 Planin sonunda "en kritik iki arastirma konusu" olarak isaretlenen iki
-problem. Ikisi de arastirildi; **ikisi de basta dusunulenden daha iyi
-durumda**, ama ikisi de kapanmis degil.
+problem. ISA semantigi halen acik bir arastirma konusu; buna karsin guest
+IOMMU/PASID icin boot ve XRT context kabul yolu gercek guest'te kapatildi.
+Asagidaki notlar gozlenen davranis ile henuz olculmemis kenar durumlarini
+ayirir.
 
 ---
 
@@ -56,7 +58,7 @@ Kaynaklar:
 
 ---
 
-## 2. VM icinde stock `amdxdna` icin SVA/PASID yolu
+## 2. VM icinde stock `amdxdna` icin SVA/PASID yolu (gercek guest'te dogrulandi)
 
 ### Problem
 
@@ -116,17 +118,45 @@ yapilandirilmissa**. `create_ctx_req.pasid` o durumda 0 gonderiliyor
 kaynaklarda carveout'u npu1 yolu icin kuran bir cagri yok (aie4/SR-IOV
 tarafinda gorunuyor), dolayisiyla pratikte (a) daha gercekci.
 
-### Sonuc
+### Ilk plan
 
 Asama 3 artik "QEMU AMD vIOMMU'da SVA gelistirmesi gerekebilir, yoksa proje
 tikanir" degil. Sirali plan:
 
 1. **Once IOVA modu.** `amdxdna.force_iova=1` ile guest'te probe ve context
-   olusturmayi calistir. Emulator zaten PASID'i sadece kaydediyor, DMA'yi
-   guest fiziksel adresi uzerinden yapiyor -- IOVA modunda bu dogru davranis.
-2. **Sonra tam SVA.** Coklu process izolasyonu ve gercek per-process adres
-   uzayi icin vIOMMU tarafinda PASID/PRI/ATS gerekiyor. Bu, projenin degil
-   QEMU'nun isi; paralel olarak takip edilmeli.
+   olusturmayi calistir. Emulator PASID'i sadece context metadata'sinda
+   kaydediyor; Stage 5 baslamadigi icin execution DMA'si yapmiyor.
+2. **Sonra tam SVA DMA.** Coklu process izolasyonu ve gercek per-process adres
+   uzayi icin vIOMMU tarafinda PASID/PRI/ATS ve QEMU'da context-aware DMA
+   address space gerekiyor. QEMU 11.1.1'in genel PCI DMA API'si bu seciciyi
+   saglamiyor (`MemTxAttrs.pid` 8 bit); bu nedenle mevcut wrapper bunu
+   uygulamiyor veya basari taklidi yapmiyor.
+
+### Gercek guest sonucu (QEMU 11.1.1)
+
+Iki ayri disposable Fedora guest snapshot'i, degistirilmemis stock
+`amdxdna.ko` ve stock XRT 2.26.0 ile A--D kabul seviyelerini gecti. Normal
+kipte komut satiri `intel_iommu=on,sm_on iommu=on` ve QEMU Intel VT-d
+`svm=on,pasid-bits=20,scalable-mode=on,fsts=on` kullandi. QEMU entegrasyonu
+PCIe ATS/PASID/PRI extended capability'lerini ve SVM icin coherent ECAP'i
+(`SMPWC`) aciyor. Driver probe sonrasi `/dev/accel/accel0` olustu; `xrt-smi
+examine` cihazi `RyzenAI-npu1` olarak gordu; uc tekrar open/close ile uc
+context create/destroy tamamlandi. MERT trace'inde `pasid 1` goruldu. Bu
+capability'ler probe/context uyumlulugu icin yayimlaniyor; QEMU 11.1.1'de
+PASID-tag'li execution DMA'si henuz yok ve execution opcode'lari acikca hata
+donuyor.
+
+Force-IOVA kipinde guest komut satiri `iommu=on amdxdna.force_iova=1` idi.
+Driver dmesg'i `Enabled force_iova mode` kaydetti; ayni firmware, XRT
+examine, tekrarli open/close ve context testleri gecti. Her iki kipte PSP'nin
+`virt_to_phys()` firmware tamponu QEMU fiziksel DMA callback'i ile okunuyor;
+normal kontrol-duzlemi DMA'si PASID'siz PCI DMA/IOMMU callback'inde kaliyor.
+Bu ayrim, Stage 5
+bellek modeli baslatilmadan onceki gercek gozlemdir; emulator henuz array veya
+execution opcode'larini basarili saymiyor.
+
+Tam makine-okunur ozet ve ham artifact yollar:
+[`docs/evidence/guest-20260908T225000Z.md`](evidence/guest-20260908T225000Z.md).
 
 Kaynaklar:
 [QEMU VT-d ATS serisi](https://patchew.org/QEMU/20240521130946.117849-1-clement.mathieu--drif@eviden.com/),

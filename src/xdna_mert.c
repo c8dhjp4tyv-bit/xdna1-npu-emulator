@@ -614,7 +614,11 @@ void xdna_mert_handle(XdnaNpu *npu, unsigned chan, const XdnaMsgHeader *hdr,
          * gerekiyor. Su an sifirlanmis bir dump yaziyoruz -- surucu ve
          * xrt-smi bunu gecerli kabul eder, icerigi bos gorunur.
          */
-        if (npu->ops->dma_write && req.dump_buff_addr && req.dump_buff_size) {
+        if (!req.dump_buff_addr || !req.dump_buff_size) {
+            resp.status = AIE2_STATUS_INVALID_PARAM;
+        } else if (!npu->ops->dma_write) {
+            resp.status = AIE2_STATUS_AIE_DMA_ERROR;
+        } else {
             static const uint8_t zeros[256] = { 0 };
             uint32_t done = 0;
             while (done < req.dump_buff_size) {
@@ -624,13 +628,16 @@ void xdna_mert_handle(XdnaNpu *npu, unsigned chan, const XdnaMsgHeader *hdr,
                 }
                 if (npu->ops->dma_write(npu->opaque, req.dump_buff_addr + done,
                                         zeros, n) != 0) {
+                    resp.status = AIE2_STATUS_AIE_DMA_ERROR;
                     break;
                 }
                 done += n;
             }
             resp.size = done;
+            if (done == req.dump_buff_size) {
+                resp.status = AIE2_STATUS_SUCCESS;
+            }
         }
-        resp.status = AIE2_STATUS_SUCCESS;
         mert_reply(npu, chan, hdr, &resp, sizeof(resp));
         return;
     }
