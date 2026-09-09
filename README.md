@@ -1,82 +1,81 @@
 # xdna1-npu-emulator
 
-`xdna1-npu-emulator` is a functional AMD XDNA1 (Phoenix/Hawk Point) NPU
-emulator for QEMU, targeting stock `amdxdna` + XRT guests. The QEMU-independent
-`libxdna` core models the boot, management-firmware, mailbox, reset, interrupt,
-and guest integration paths; reproducible QEMU 11.1.1 builds and disposable
-real-guest validation are included. The detailed implementation notes below
-are currently in Turkish; the code, scripts, and test results are the
-authoritative interface.
+`xdna1-npu-emulator` is a functional AMD XDNA1 (Phoenix / Hawk Point) NPU
+emulator for QEMU, targeting unmodified stock `amdxdna` + XRT guests. The
+QEMU-independent `libxdna` core models the boot, management-firmware, mailbox,
+reset, interrupt, and guest-integration paths; reproducible QEMU 11.1.1 builds
+and disposable real-guest validation are included.
+
+The goal is to run real XDNA1 workloads inside a guest VM on a host with no
+physical NPU, using the **unmodified stock `amdxdna` driver and stock XRT**.
+This is not a vGPU; the intended model is closer to QEMU functionally emulating
+a processor architecture.
+
+Detailed goals and scope: [`docs/00-hedef-ve-kapsam.md`](docs/00-hedef-ve-kapsam.md).
 
 > [!WARNING]
 > **Current limitations:** This emulator is not yet capable of executing
-> arbitrary XDNA workloads; the Stage 5 memory model is pending. Array- and
-> execution-dependent opcodes continue to fail explicitly rather than report
-> fabricated success.
+> arbitrary XDNA workloads. The Stage 5 memory model is not yet implemented.
+> Array- and execution-dependent opcodes continue to fail explicitly rather
+> than report fabricated success.
 
 No firmware blobs, kernel modules, or host-generated guest images are vendored
 or committed. The disposable guest-image workflow copies the selected signed
 host artifacts at build time and keeps them under ignored local output paths.
 
-AMD XDNA1 (Phoenix / Hawk Point) NPU'nun **fonksiyonel donanim emulatoru**.
+## Structure
 
-Hedef: host makinede fiziksel NPU olmadan, guest VM icinde **degistirilmemis
-stock `amdxdna` surucusu ve stock XRT** ile gercek XDNA1 workload'larini
-calistirmak. Bu bir vGPU degil; QEMU'nun baska bir CPU mimarisini emule
-etmesine benzer bir is.
-
-Ayrintili hedef ve kapsam: [`docs/00-hedef-ve-kapsam.md`](docs/00-hedef-ve-kapsam.md).
-
-## Yapi
-
-```
-include/xdna/     libxdna genel API'si ve dogrulanmis donanim sabitleri
-src/              QEMU'dan bagimsiz emulator cekirdegi
-  xdna_device.c     MMIO yonlendirmesi, reset, aygit govdesi
-  xdna_psp.c        PSP firmware yukleme durum makinesi
-  xdna_smu.c        SMU guc / saat durum makinesi
-  xdna_fw.c         firmware boot el sikismasi
-  xdna_mailbox.c    mailbox ring buffer protokolu (cihaz tarafi)
-  xdna_mert.c       yonetim firmware'i (MERT) mesaj isleyicisi
-tests/            surucu davranisini taklit eden kosumlar
-qemu/             QEMU PCI aygiti sarmalayicisi
-docs/             hedef, dogrulanmis donanim arayuzu, yol haritasi, acik sorular
+```text
+include/xdna/     libxdna public API and verified hardware constants
+src/              QEMU-independent emulator core
+  xdna_device.c     MMIO routing, reset, device body
+  xdna_psp.c        PSP firmware-load state machine
+  xdna_smu.c        SMU power/clock state machine
+  xdna_fw.c         firmware boot handshake
+  xdna_mailbox.c    mailbox ring-buffer protocol, device side
+  xdna_mert.c       management-firmware (MERT) message handler
+tests/            tests that reproduce stock-driver behavior
+qemu/             QEMU PCI-device wrapper
+docs/             scope, verified hardware interface, roadmap, open questions
 ```
 
-Cekirdek kasitli olarak QEMU'dan bagimsiz: ayni kod hem QEMU aygitindan hem
-de testlerden surulebiliyor, boylece her degisiklik QEMU/VM kurmadan
-dogrulanabiliyor.
+The core is intentionally independent from QEMU: the same code can be driven
+from both the QEMU device and the test suite, so most changes can be validated
+without booting a VM.
 
-## Derleme ve test
+## Build and test
 
 ```sh
 make          # build/libxdna.a
-make test     # surucu boot dizisi kosumu
-make qemu     # clean QEMU 11.1.1 integration/build (out-of-tree)
+make test     # run the stock-driver boot-sequence test
+make qemu     # clean QEMU 11.1.1 integration/build, out of tree
 ```
 
-`make test` stock `amdxdna` surucusunun boot dizisini birebir taklit eder --
-SMU guc dizisi, PSP firmware yukleme, firmware el sikismasi, mailbox kanali,
-runtime config, PASID atama, suspend/resume, surum sorgulari, context
-olusturma/yok etme, ring buffer sarmalanmasi ve hata yollari. Test kodu
-emulatorun ic yapilarina bakmaz; sadece MMIO okur/yazar.
+`make test` reproduces the stock `amdxdna` driver's boot sequence through the
+observable MMIO interface: the SMU power sequence, PSP firmware load, firmware
+handshake, mailbox channel, runtime configuration, PASID assignment,
+suspend/resume, version queries, context creation/destruction, ring-buffer
+wraparound, and error paths. The test code does not inspect emulator internals;
+it only performs MMIO reads and writes.
 
-## Durum
+## Status
 
-| Asama | Durum |
+| Stage | Status |
 | --- | --- |
-| 1. PCI kabugu | **tamamlandi** -- temiz QEMU 11.1.1 agacinda `-Werror` ve gercek guest A kabul testi yesil |
-| 2. Surucu boot'u | **tamamlandi (gercek guest)** -- stock `amdxdna` probe'u, firmware boot'u ve `/dev/accel/accel0` yesil |
-| 3. Guest IOMMU (SVA/PASID) | **probe/context gozlemlendi** -- normal SVA/PASID ve `force_iova=1` yollarinin ikisi de gercek guest'te yesil; PASID-tag'li execution DMA henuz yok |
-| 4. Yonetim firmware'i (MERT) | temel mesajlar tamam, testli |
-| 5-10. Bellek modeli, array, ISA, ctrlcode, uctan uca | **baslanmadi** |
+| 1. PCI shell | **complete** — real-guest Acceptance A passes and the device builds in a clean QEMU 11.1.1 tree with `-Werror` |
+| 2. Driver boot | **complete on a real guest** — stock `amdxdna` probe, firmware boot, and `/dev/accel/accel0` all pass |
+| 3. Guest IOMMU (SVA/PASID) | **probe/context path observed** — both normal SVA/PASID and `force_iova=1` pass in a real guest; PASID-tagged execution DMA is not implemented yet |
+| 4. Management firmware (MERT) | basic management messages and XRT context lifecycle complete and tested |
+| 5–10. Memory model, array, ISA, ctrlcode, end-to-end execution | **not started** |
 
-Tam liste ve kabul kriterleri: [`docs/02-yol-haritasi.md`](docs/02-yol-haritasi.md).
+Full roadmap and acceptance criteria:
+[`docs/02-yol-haritasi.md`](docs/02-yol-haritasi.md).
 
-Gercek guest calistirmasi icin once [`qemu/README.md`](qemu/README.md)'deki
-`scripts/build-qemu.sh` adimini tamamlayin. Tekrarlanabilir, disposable bir
-guest image'i host'un sectigi cekirdek/modul/firmware/XRT yiginindan su sekilde
-olusturabilirsiniz:
+## Real guest validation
+
+For real-guest validation, first complete the `scripts/build-qemu.sh` step from
+[`qemu/README.md`](qemu/README.md). A reproducible disposable guest image can
+then be built from the host-selected kernel/module/firmware/XRT stack:
 
 ```sh
 scripts/build-guest-image.sh
@@ -85,33 +84,41 @@ XDNA_QEMU_BINARY=/tmp/xdna-qemu/qemu-system-x86_64 \
   scripts/guest-integration.sh --mode both --debug-driver
 ```
 
-Image, sabitlenmis Fedora container userspace'ini kullanir; stock kernel,
-`amdxdna.ko`, firmware ve XRT host'tan kopyalanir. Runner her modu ayri
-`-snapshot` boot'unda deneyip secilen `build/guest/...` cikti dizininin
-`evidence/<timestamp>/` altinda
-`summary.json`, insan-okunur rapor ve ham `lspci`, `dmesg`, `xrt-smi`, QEMU
-trace ve surum kanitlarini birakir. Guest kernel'i veya driver'i degistirmez.
+The image uses a pinned Fedora container userspace. The stock kernel,
+`amdxdna.ko`, firmware, and XRT are copied from the host during image creation.
+The runner boots each mode in a separate `-snapshot` VM and writes
+`summary.json`, a human-readable report, and raw `lspci`, `dmesg`, `xrt-smi`,
+QEMU trace, and version evidence under `evidence/<timestamp>/` in the selected
+local `build/guest/...` output directory. It does not modify guest kernel or
+driver files; force-IOVA mode only reloads `amdxdna` with its stock module
+parameter.
 
-Son dogrulama kaniti: [`docs/evidence/guest-20260908T225000Z.md`](docs/evidence/guest-20260908T225000Z.md)
-(ham artifact'lar, kosumun sectigi yerel `build/guest/...` cikti dizininde,
-`normal/` ve `force_iova/` alt dizinlerinde).
+Latest validated evidence:
+[`docs/evidence/guest-20260908T225000Z.md`](docs/evidence/guest-20260908T225000Z.md).
+Raw artifacts remain under the selected local `build/guest/...` output tree,
+with separate `normal/` and `force_iova/` directories.
 
-Yurutme opcode'lari (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,
-`CHAIN_EXEC_*`, `SYNC_BO`) su an bilerek **acikca hata donduruyor**. XDNA
-array'i olmadan sessizce "basarili" demek yanlis sonuc uretirdi.
+Execution opcodes (`CONFIG_CU`, `EXECUTE_BUFFER_CF`, `EXEC_DPU`,
+`CHAIN_EXEC_*`, and `SYNC_BO`) currently **return explicit errors by design**.
+Reporting success before the XDNA memory/array execution model exists would
+produce incorrect results.
 
-## Dogrulanmis donanim arayuzu
+## Verified hardware interface
 
-`include/xdna/xdna_regs.h` icindeki her deger upstream `amdxdna` surucusunun
-kaynagindan cikarilmistir; tahmin edilenler `TODO(dogrula)` ile isaretlidir.
-Referans belge: [`docs/01-donanim-arayuzu.md`](docs/01-donanim-arayuzu.md).
+Every value in `include/xdna/xdna_regs.h` is derived from the publicly
+available upstream `amdxdna` driver source. Values that still require hardware
+verification are marked with `TODO(verify)`.
 
-En kritik ayrinti: mailbox cevaplarinin boyutu, o opcode'un
-`struct <name>_resp` boyutuna **birebir** esit olmali -- hata durumunda bile.
-Surucu (`xdna_msg_cb`) boyutu karsilastirip farkliysa `-EINVAL` donduruyor.
+Reference document:
+[`docs/01-donanim-arayuzu.md`](docs/01-donanim-arayuzu.md).
 
-## Lisans
+One critical protocol detail is that each mailbox response size must match the
+corresponding `struct <name>_resp` size **exactly**, including error responses.
+The stock driver (`xdna_msg_cb`) compares the received size and returns
+`-EINVAL` on a mismatch.
 
-GPL-2.0-only; tam lisans metni [`LICENSE`](LICENSE) dosyasindadir. Donanim
-arayuz sabitleri, GPL-2.0 lisansli `amdxdna` surucusunun herkese acik
-kaynagindan cikarilmistir.
+## License
+
+GPL-2.0-only. The complete license text is available in [`LICENSE`](LICENSE).
+Hardware-interface constants are derived from the publicly available
+GPL-2.0-licensed `amdxdna` driver source.
