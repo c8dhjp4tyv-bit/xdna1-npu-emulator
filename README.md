@@ -1,5 +1,23 @@
 # xdna1-npu-emulator
 
+`xdna1-npu-emulator` is a functional AMD XDNA1 (Phoenix/Hawk Point) NPU
+emulator for QEMU, targeting stock `amdxdna` + XRT guests. The QEMU-independent
+`libxdna` core models the boot, management-firmware, mailbox, reset, interrupt,
+and guest integration paths; reproducible QEMU 11.1.1 builds and disposable
+real-guest validation are included. The detailed implementation notes below
+are currently in Turkish; the code, scripts, and test results are the
+authoritative interface.
+
+> [!WARNING]
+> **Current limitations:** This emulator is not yet capable of executing
+> arbitrary XDNA workloads; the Stage 5 memory model is pending. Array- and
+> execution-dependent opcodes continue to fail explicitly rather than report
+> fabricated success.
+
+No firmware blobs, kernel modules, or host-generated guest images are vendored
+or committed. The disposable guest-image workflow copies the selected signed
+host artifacts at build time and keeps them under ignored local output paths.
+
 AMD XDNA1 (Phoenix / Hawk Point) NPU'nun **fonksiyonel donanim emulatoru**.
 
 Hedef: host makinede fiziksel NPU olmadan, guest VM icinde **degistirilmemis
@@ -94,5 +112,6 @@ Surucu (`xdna_msg_cb`) boyutu karsilastirip farkliysa `-EINVAL` donduruyor.
 
 ## Lisans
 
-GPL-2.0-only. Donanim arayuz sabitleri, GPL-2.0 lisansli `amdxdna`
-surucusunun herkese acik kaynagindan cikarilmistir.
+GPL-2.0-only; tam lisans metni [`LICENSE`](LICENSE) dosyasindadir. Donanim
+arayuz sabitleri, GPL-2.0 lisansli `amdxdna` surucusunun herkese acik
+kaynagindan cikarilmistir.
